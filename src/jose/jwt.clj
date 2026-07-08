@@ -1,7 +1,8 @@
 (ns jose.jwt
   (:require [clojure.string :as str]
             [jose.jwe :as jwe]
-            [jose.jwk :as jwk])
+            [jose.jwk :as jwk]
+            [jose.jwks :as jwks])
   (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader$Builder JWSProvider)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
@@ -305,6 +306,27 @@
        (throw (jose-ex :invalid-signature "Invalid JWT signature" e {})))
      (catch ParseException e
        (throw (jose-ex :parse-failure "Failed to parse JWT claims" e {}))))))
+
+(defn- select-jwks-key
+  [source compact]
+  (let [jwt (signed-jwt compact)
+        header (.getHeader jwt)
+        kid (.getKeyID header)
+        alg (.getAlgorithm header)
+        keys (jwks/get-keys source (cond-> {:alg alg}
+                                     kid (assoc :kid kid)))]
+    (cond
+      (empty? keys) (throw (jose-ex :key-not-found "No matching JWK found" nil {}))
+      (and (nil? kid) (< 1 (count keys))) (throw (jose-ex :ambiguous-key "Multiple matching JWKs found" nil {}))
+      :else (first keys))))
+
+(defn verify-with-jwks
+  "Selects a verification key from a JWKS source, then verifies a compact JWT."
+  ([source compact]
+   (verify-with-jwks source compact {}))
+  ([source compact opts]
+   (validate-options! verify-options opts)
+   (verify (select-jwks-key source compact) compact opts)))
 
 (defn- parse-claims
   ^JWTClaimsSet [s]

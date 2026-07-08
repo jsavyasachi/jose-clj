@@ -1,6 +1,7 @@
 (ns jose.jws
   (:require [clojure.string :as str]
-            [jose.jwk :as jwk])
+            [jose.jwk :as jwk]
+            [jose.jwks :as jwks])
   (:import (com.nimbusds.jose JOSEException JWSAlgorithm JWSHeader JWSHeader$Builder JWSObject JWSProvider Payload)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
@@ -13,6 +14,7 @@
 (set! *warn-on-reflection* true)
 
 (def ^:private sign-options #{:alg :kid :headers})
+(def ^:private verify-with-jwks-options #{})
 
 (def ^:private alg-names
   {:hs256 "HS256"
@@ -47,6 +49,12 @@
   [opts]
   (doseq [option (keys opts)]
     (when-not (contains? sign-options option)
+      (invalid-option! option))))
+
+(defn- validate-empty-options!
+  [opts]
+  (doseq [option (keys opts)]
+    (when-not (contains? verify-with-jwks-options option)
       (invalid-option! option))))
 
 (defn- algorithm
@@ -229,3 +237,21 @@
   "Returns the unverified compact JWS header as a Clojure map."
   [compact]
   (header-map (.getHeader (jws-object compact))))
+
+(defn- select-jwks-key
+  [source compact]
+  (let [{:keys [kid alg]} (header compact)
+        keys (jwks/get-keys source (cond-> {:alg alg}
+                                     kid (assoc :kid kid)))]
+    (cond
+      (empty? keys) (throw (jose-ex :key-not-found "No matching JWK found" nil {}))
+      (and (nil? kid) (< 1 (count keys))) (throw (jose-ex :ambiguous-key "Multiple matching JWKs found" nil {}))
+      :else (first keys))))
+
+(defn verify-with-jwks
+  "Selects a verification key from a JWKS source, then verifies a compact JWS."
+  ([source compact]
+   (verify-with-jwks source compact {}))
+  ([source compact opts]
+   (validate-empty-options! opts)
+   (verify (select-jwks-key source compact) compact)))

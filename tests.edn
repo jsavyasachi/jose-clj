@@ -1,4 +1,5 @@
 #kaocha/v1
 {:tests [{:id :unit
           :test-paths ["test"]}]
+ :skip-meta [:integration]
  :plugins [:kaocha.plugin/randomize]}

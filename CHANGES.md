@@ -14,3 +14,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `jose.jwt` for signed JWT creation, verification, unverified claims, and registered-claim validation.
 - Add `jose.jwe` for compact JWE encryption, decryption, unverified headers, and binary payload access.
 - Add encrypted JWT and nested sign-then-encrypt JWT support to `jose.jwt`.
+- Add `jose.jwks` for local and remote JWKS sources, cached remote key selection, and `verify-with-jwks` helpers for JWS and JWT verification.

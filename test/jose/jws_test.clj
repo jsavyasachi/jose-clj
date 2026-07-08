@@ -1,10 +1,12 @@
 (ns jose.jws-test
   (:require [clojure.test :refer [deftest is testing]]
             [jose.jwk :as jwk]
+            [jose.jwks :as jwks]
             [jose.jws :as jws])
   (:import (clojure.lang ExceptionInfo)
-           (com.nimbusds.jose.jwk Curve)
+           (com.nimbusds.jose.jwk Curve OctetSequenceKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator)
+           (com.nimbusds.jose.util Base64URL)
            (java.nio.charset StandardCharsets)
            (org.bouncycastle.jce.provider BouncyCastleProvider)))
 
@@ -135,6 +137,38 @@
         result (jws/verify key (jws/sign key bytes))]
     (is (= [0 1 2 -1] (vec (:payload-bytes result))))
     (is (= "\u0000\u0001\u0002�" (:payload result)))))
+
+(deftest verify-with-jwks-selects-key
+  (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
+        key-b (jwk/generate :rsa {:kid "b" :use :sig :alg :rs256})
+        key-c (jwk/generate :rsa {:kid "c" :use :sig :alg :rs256})
+        source (jwks/local-source [(jwk/public-jwk key-a) (jwk/public-jwk key-b)])
+        compact (jws/sign key-a "hello")]
+    (is (= "hello" (:payload (jws/verify-with-jwks source compact))))
+    (is (= "a" (get-in (jws/verify-with-jwks source compact) [:header :kid])))
+    (is (= :key-not-found
+           (:jose/error (thrown-data #(jws/verify-with-jwks source
+                                                            (jws/sign key-c "hello"))))))
+    (is (= :ambiguous-key
+           (:jose/error (thrown-data #(jws/verify-with-jwks source
+                                                            (jws/sign key-a "hello" {:kid nil}))))))))
+
+(deftest alg-confusion-attack-is-rejected
+  ;; A JWKS serves only an RSA public key, with no "alg" param (as many real
+  ;; endpoints do). An attacker forges an HS256 token using the RSA public key
+  ;; material as the HMAC secret and sets the kid to match. Because the verifier
+  ;; is chosen from the key type (RSA -> RSASSAVerifier), never from the token's
+  ;; header alg, the forgery must not be accepted.
+  (let [rsa (jwk/generate :rsa {:kid "a" :use :sig})
+        pub (jwk/public-jwk rsa)
+        source (jwks/local-source [pub])
+        secret (.decode (Base64URL. (name (:n (jwk/->map pub)))))
+        forged-key (-> (OctetSequenceKey$Builder. (Base64URL/encode ^bytes secret))
+                       (.keyID "a")
+                       (.build))
+        forged (jws/sign forged-key "pwned" {:alg :hs256})]
+    (is (contains? #{:key-not-found :invalid-signature}
+                   (:jose/error (thrown-data #(jws/verify-with-jwks source forged)))))))
 
 (deftest failures-are-ex-info
   (let [key (jwk/generate :oct {:size 256})

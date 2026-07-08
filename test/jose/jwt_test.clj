@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is testing]]
             [jose.jwe :as jwe]
             [jose.jwk :as jwk]
+            [jose.jwks :as jwks]
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
            (java.time Instant)))
@@ -79,6 +80,26 @@
     (is (= :missing-claim (:jose/error (thrown-data #(jwt/verify key no-sub {:required [:sub]})))))
     (is (= :sub (:claim (thrown-data #(jwt/verify key no-sub {:required [:sub]})))))
     (is (= "subject" (:sub (jwt/verify key skewed {:clock-skew 60}))))))
+
+(deftest verify-with-jwks-selects-key-and-validates-claims
+  (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
+        key-b (jwk/generate :rsa {:kid "b" :use :sig :alg :rs256})
+        key-c (jwk/generate :rsa {:kid "c" :use :sig :alg :rs256})
+        source (jwks/local-source [(jwk/public-jwk key-a) (jwk/public-jwk key-b)])
+        compact (jwt/sign key-a {:sub "subject" :aud ["api"] :exp 2051222400})]
+    (is (= "subject" (:sub (jwt/verify-with-jwks source compact {:aud "api"}))))
+    (is (= :claim-mismatch
+           (:jose/error (thrown-data #(jwt/verify-with-jwks source compact {:aud "web"})))))
+    (is (= :key-not-found
+           (:jose/error (thrown-data #(jwt/verify-with-jwks source
+                                                            (jwt/sign key-c {:sub "subject"
+                                                                             :exp 2051222400}))))))
+    (is (= :ambiguous-key
+           (:jose/error (thrown-data #(jwt/verify-with-jwks source
+                                                            (jwt/sign key-a
+                                                                      {:sub "subject"
+                                                                       :exp 2051222400}
+                                                                      {:kid nil}))))))))
 
 (deftest invalid-signatures-and-input
   (let [key (jwk/generate :oct {:size 256})
