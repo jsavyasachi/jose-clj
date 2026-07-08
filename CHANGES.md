@@ -10,3 +10,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add `jose.jwk` for JWK generation, parsing, conversion, inspection, and JWK sets.
+- Add `jose.jws` for compact JWS signing, verification, unverified headers, and binary payload access.
+- Add `jose.jwt` for signed JWT creation, verification, unverified claims, and registered-claim validation.
