@@ -170,6 +170,18 @@
     (is (contains? #{:key-not-found :invalid-signature}
                    (:jose/error (thrown-data #(jws/verify-with-jwks source forged)))))))
 
+(deftest unsecured-alg-none-token-is-rejected
+  ;; The classic "alg":"none" forgery: a header of {"alg":"none"} with an empty
+  ;; signature. It must never verify against a real key.
+  (let [b64 (fn [^String s]
+              (-> (java.util.Base64/getUrlEncoder)
+                  (.withoutPadding)
+                  (.encodeToString (.getBytes s StandardCharsets/UTF_8))))
+        forged (str (b64 "{\"alg\":\"none\"}") "." (b64 "{\"sub\":\"attacker\"}") ".")
+        key (jwk/generate :rsa {:kid "a"})]
+    (is (contains? #{:parse-failure :invalid-signature}
+                   (:jose/error (thrown-data #(jws/verify key forged)))))))
+
 (deftest failures-are-ex-info
   (let [key (jwk/generate :oct {:size 256})
         compact (jws/sign key "hello")

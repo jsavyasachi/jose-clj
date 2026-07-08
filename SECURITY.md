@@ -6,6 +6,20 @@ This is a community-maintained library. Security fixes are applied to the
 **latest released version** on Clojars. Please upgrade to the latest release
 before reporting an issue.
 
+## Scope
+
+jose-clj is a thin Clojure wrapper over [Nimbus JOSE+JWT](https://connect2id.com/products/nimbus-jose-jwt);
+it performs no cryptography of its own. Reports about this library concern how it
+uses the engine: key or algorithm selection, verification and validation logic,
+error handling that could mask a failed check, and unsafe defaults. Flaws in the
+underlying cryptographic primitives should be reported to the Nimbus JOSE+JWT
+maintainers upstream.
+
+Two token-forgery classes are covered by regression tests and must stay closed:
+algorithm confusion (an HS256 token forged with an asymmetric public key as the
+MAC secret) and unsecured `alg:none` tokens. A report demonstrating either against
+a released version is in scope and will be treated as high severity.
+
 ## Reporting a vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues.**
