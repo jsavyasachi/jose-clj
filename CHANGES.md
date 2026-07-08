@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.1.1] - 2026-07-08
+
+### Changed
+
+- Lower the supported JDK floor from 17 to 11. The library already ran on JDK 11
+  (Nimbus JOSE+JWT targets Java 7 bytecode; Tink and BouncyCastle target Java 8);
+  the previous 17 requirement was not real. CI now covers JDK 11, 17, and 21.
+
+
 ## [0.1.0] - 2026-07-08
 
 ### Added

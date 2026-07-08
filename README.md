@@ -32,16 +32,16 @@ Nimbus and stay correct as it is updated.
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.1.0"}
+net.clojars.savya/jose-clj {:mvn/version "0.1.1"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/jose-clj "0.1.0"]
+[net.clojars.savya/jose-clj "0.1.1"]
 ```
 
-JDK 17+. Two algorithms need an optional engine on the classpath: EdDSA/Ed25519
+JDK 11+. Two algorithms need an optional engine on the classpath: EdDSA/Ed25519
 requires `com.google.crypto.tink/tink`, and ES256K (secp256k1) requires
 BouncyCastle (`org.bouncycastle/bcprov-jdk18on`). Everything else runs on the
 plain JDK. If you call an EdDSA or ES256K path without the engine present, the

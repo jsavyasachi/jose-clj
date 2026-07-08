@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        jdk: ['17', '21']
+        jdk: ['11', '17', '21']
         clojure: ['1.11', '1.12']
     name: jdk ${{ matrix.jdk }} / clojure ${{ matrix.clojure }}
     steps:
