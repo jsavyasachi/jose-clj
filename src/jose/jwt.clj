@@ -1,7 +1,8 @@
 (ns jose.jwt
   (:require [clojure.string :as str]
+            [jose.jwe :as jwe]
             [jose.jwk :as jwk])
-  (:import (com.nimbusds.jose JOSEException JWSAlgorithm JWSHeader$Builder JWSProvider)
+  (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader$Builder JWSProvider)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
@@ -14,6 +15,8 @@
 (set! *warn-on-reflection* true)
 
 (def ^:private sign-options #{:alg :kid :headers :now-iat? :expires-in})
+(def ^:private encrypt-options #{:alg :enc :kid :headers :now-iat? :expires-in})
+(def ^:private jwe-options #{:alg :enc :kid :headers})
 (def ^:private verify-options #{:aud :iss :clock-skew :required})
 (def ^:private registered-claims #{"iss" "sub" "aud" "exp" "nbf" "iat" "jti"})
 
@@ -193,6 +196,7 @@
 (defn- apply-header!
   [^JWSHeader$Builder builder k v]
   (case k
+    :typ (.type builder (JOSEObjectType. (str v)))
     :cty (.contentType builder (str v))
     (.customParam builder (name k) (stringify-json-value v))))
 
@@ -276,6 +280,12 @@
     (doseq [claim (:required opts)]
       (require-claim! claims claim))))
 
+(defn- validated-claims
+  [^JWTClaimsSet jwt-claims opts]
+  (let [claims (claims-map jwt-claims)]
+    (validate-claims! claims opts)
+    claims))
+
 (defn verify
   "Verifies a compact signed JWT and returns claims.
 
@@ -290,13 +300,64 @@
            ok? (.verify jwt (verifier (jwk/parse key)))]
        (when-not ok?
          (throw (jose-ex :invalid-signature "Invalid JWT signature" nil {})))
-       (let [claims (claims-map (.getJWTClaimsSet jwt))]
-         (validate-claims! claims opts)
-         claims))
+       (validated-claims (.getJWTClaimsSet jwt) opts))
      (catch JOSEException e
        (throw (jose-ex :invalid-signature "Invalid JWT signature" e {})))
      (catch ParseException e
        (throw (jose-ex :parse-failure "Failed to parse JWT claims" e {}))))))
+
+(defn- parse-claims
+  ^JWTClaimsSet [s]
+  (try
+    (JWTClaimsSet/parse ^String s)
+    (catch ParseException e
+      (throw (jose-ex :parse-failure "Failed to parse JWT claims" e {})))))
+
+(defn- select-options
+  [allowed opts]
+  (select-keys opts allowed))
+
+(defn encrypt
+  "Encrypts a JWT claims map and returns a compact JWE string."
+  (^String [key claims]
+   (encrypt key claims {}))
+  (^String [key claims opts]
+   (validate-options! encrypt-options opts)
+   (let [jwt-claims (claims-set claims opts)]
+     (jwe/encrypt key (.toString jwt-claims) (select-options jwe-options opts)))))
+
+(defn decrypt
+  "Decrypts a compact encrypted JWT and returns validated claims."
+  ([key compact]
+   (decrypt key compact {}))
+  ([key compact opts]
+   (validate-options! verify-options opts)
+   (validated-claims (parse-claims (:payload (jwe/decrypt key compact))) opts)))
+
+(defn sign-then-encrypt
+  "Signs claims as a compact JWT, then encrypts the signed JWT as a nested JWE."
+  [sign-key encrypt-key claims opts]
+  (let [sign-opts (:sign-opts opts)
+        encrypt-opts (:encrypt-opts opts)
+        signed (sign sign-key claims sign-opts)
+        headers (assoc (:headers encrypt-opts) :cty "JWT")]
+    (jwe/encrypt encrypt-key signed (assoc encrypt-opts :headers headers))))
+
+(defn decrypt-then-verify
+  "Decrypts a nested JWE, then verifies the inner signed JWT."
+  ([decrypt-key verify-key compact]
+   (decrypt-then-verify decrypt-key verify-key compact {}))
+  ([decrypt-key verify-key compact opts]
+   (validate-options! verify-options opts)
+   (let [payload (:payload (jwe/decrypt decrypt-key compact))]
+     (when-not (= 3 (count (str/split payload #"\.")))
+       (fail! :not-a-nested-jwt "JWE payload is not a nested JWT" {}))
+     (try
+       (verify verify-key payload opts)
+       (catch clojure.lang.ExceptionInfo e
+         (if (= :parse-failure (:jose/error (ex-data e)))
+           (throw (jose-ex :not-a-nested-jwt "JWE payload is not a nested JWT" e {}))
+           (throw e)))))))
 
 (defn claims
   "Returns unverified compact JWT claims.

@@ -1,5 +1,7 @@
 (ns jose.jwt-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [jose.jwe :as jwe]
             [jose.jwk :as jwk]
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
@@ -99,3 +101,56 @@
              (:jose/error (thrown-data #(jwt/verify key (jwt/sign key {:sub "subject"}) {:unknown true})))))
       (is (= :unknown
              (:option (thrown-data #(jwt/verify key (jwt/sign key {:sub "subject"}) {:unknown true}))))))))
+
+(deftest encrypt-and-decrypt-claims
+  (let [key (jwk/generate :rsa {:kid "jwt-jwe"})
+        exp (Instant/parse "2035-01-01T00:00:00Z")
+        compact (jwt/encrypt key {:iss "issuer"
+                                  :aud ["api"]
+                                  :exp exp
+                                  "role" "admin"}
+                             {:headers {:cty "JWT"}})
+        claims (jwt/decrypt key compact {:aud "api"
+                                         :iss "issuer"
+                                         :required ["role"]})]
+    (is (= {:alg :rsa-oaep-256 :enc :a256gcm :kid "jwt-jwe" :cty "JWT"}
+           (select-keys (jwe/header compact) [:alg :enc :kid :cty])))
+    (is (= "issuer" (:iss claims)))
+    (is (= ["api"] (:aud claims)))
+    (is (= exp (:exp claims)))
+    (is (= "admin" (get claims "role")))))
+
+(deftest nested-jwt-round-trip
+  (let [sign-key (jwk/generate :oct {:size 256})
+        encrypt-key (jwk/generate :rsa {:kid "nested-rsa"})
+        claims {:sub "subject" :aud ["api"] :exp 2051222400}
+        compact (jwt/sign-then-encrypt sign-key encrypt-key claims
+                                       {:sign-opts {:headers {:typ "JWT"}}
+                                        :encrypt-opts {:enc :a128gcm}})
+        inner (:payload (jwe/decrypt encrypt-key compact))]
+    (is (= "JWT" (:cty (jwe/header compact))))
+    (is (= 3 (count (str/split inner #"\."))))
+    (is (= "subject"
+           (:sub (jwt/decrypt-then-verify encrypt-key sign-key compact {:aud "api"}))))
+    (is (= :invalid-signature
+           (:jose/error (thrown-data #(jwt/decrypt-then-verify encrypt-key
+                                                               (jwk/generate :oct {:size 256})
+                                                               compact
+                                                               {:aud "api"})))))))
+
+(deftest nested-jwt-rejects-non-jwt-payload
+  (let [key (jwk/generate :oct {:size 256})
+        compact (jwe/encrypt key "not-a-jwt" {:alg :dir :headers {:cty "JWT"}})]
+    (is (= :not-a-nested-jwt
+           (:jose/error (thrown-data #(jwt/decrypt-then-verify key key compact)))))))
+
+(deftest nested-jwt-rejects-tampered-inner-signature
+  (let [sign-key (jwk/generate :oct {:size 256})
+        encrypt-key (jwk/generate :oct {:size 256})
+        signed (jwt/sign sign-key {:sub "subject" :exp 2051222400})
+        tampered (str signed "x")
+        compact (jwe/encrypt encrypt-key tampered {:alg :dir :headers {:cty "JWT"}})]
+    (is (= :invalid-signature
+           (:jose/error (thrown-data #(jwt/decrypt-then-verify encrypt-key
+                                                               sign-key
+                                                               compact)))))))
