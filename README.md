@@ -41,6 +41,10 @@ Leiningen:
 [net.clojars.savya/jose-clj "0.1.1"]
 ```
 
+Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. Because jose-clj is a thin wrapper,
+Nimbus updates (including security fixes) are picked up by bumping that one
+dependency; the weekly antq workflow proposes bumps automatically.
+
 JDK 11+. Two algorithms need an optional engine on the classpath: EdDSA/Ed25519
 requires `com.google.crypto.tink/tink`, and ES256K (secp256k1) requires
 BouncyCastle (`org.bouncycastle/bcprov-jdk18on`). Everything else runs on the
