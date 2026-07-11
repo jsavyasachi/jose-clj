@@ -138,6 +138,26 @@
     (is (= [0 1 2 -1] (vec (:payload-bytes result))))
     (is (= "\u0000\u0001\u0002�" (:payload result)))))
 
+(deftest detached-jws-round-trips
+  (let [key (jwk/generate :oct {:size 256})
+        compact (jws/sign key "hello" {:detached? true})
+        segments (clojure.string/split compact #"\." -1)]
+    (is (= 3 (count segments)))
+    (is (= "" (second segments)))
+    (is (= "hello" (:payload (jws/verify-detached key compact "hello"))))
+    (is (= :invalid-signature
+           (:jose/error (thrown-data #(jws/verify-detached key compact "tampered")))))))
+
+(deftest unencoded-jws-round-trips
+  (let [key (jwk/generate :oct {:size 256})
+        attached (jws/sign key "hello" {:b64? false})
+        detached (jws/sign key "$.02" {:detached? true :b64? false})]
+    (is (clojure.string/includes? attached ".hello."))
+    (is (= "hello" (:payload (jws/verify key attached))))
+    (is (= "$.02" (:payload (jws/verify-detached key detached "$.02"))))
+    (is (= false (get-in (jws/header attached) [:b64])))
+    (is (= ["b64"] (get-in (jws/header attached) [:crit])))))
+
 (deftest verify-with-jwks-selects-key
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
         key-b (jwk/generate :rsa {:kid "b" :use :sig :alg :rs256})

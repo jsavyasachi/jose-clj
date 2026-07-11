@@ -32,24 +32,25 @@ Nimbus and stay correct as it is updated.
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.1.1"}
+net.clojars.savya/jose-clj {:mvn/version "0.2.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/jose-clj "0.1.1"]
+[net.clojars.savya/jose-clj "0.2.0"]
 ```
 
 Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. Because jose-clj is a thin wrapper,
 Nimbus updates (including security fixes) are picked up by bumping that one
 dependency; the weekly antq workflow proposes bumps automatically.
 
-JDK 11+. Two algorithms need an optional engine on the classpath: EdDSA/Ed25519
-requires `com.google.crypto.tink/tink`, and ES256K (secp256k1) requires
-BouncyCastle (`org.bouncycastle/bcprov-jdk18on`). Everything else runs on the
-plain JDK. If you call an EdDSA or ES256K path without the engine present, the
-error is `{:jose/error :missing-optional-dep}` rather than a `NoClassDefFoundError`.
+JDK 11+. Some paths need optional engines on the classpath: EdDSA/Ed25519
+requires `com.google.crypto.tink/tink`, ES256K (secp256k1) requires
+BouncyCastle (`org.bouncycastle/bcprov-jdk18on`), and PEM parsing requires
+`org.bouncycastle/bcpkix-jdk18on`. Everything else runs on the plain JDK. If you
+call one of these paths without the engine present, the error is
+`{:jose/error :missing-optional-dep}` rather than a `NoClassDefFoundError`.
 
 ## Usage
 
@@ -95,6 +96,24 @@ error is `{:jose/error :missing-optional-dep}` rather than a `NoClassDefFoundErr
 (jwk/set->json ks)      ; public-only by default
 ```
 
+### PEM keys (`jose.pem`)
+
+```clojure
+(require '[jose.pem :as pem])
+
+(def private-pem (pem/jwk->pem k {:private? true})) ; PKCS#8 PRIVATE KEY
+(def public-pem  (pem/jwk->pem k))                  ; SPKI PUBLIC KEY
+
+(pem/pem->jwk private-pem) ; => JWK map
+(pem/pem->jwk public-pem)  ; => public JWK map
+```
+
+`pem->jwk` accepts PEM public keys, private keys, and X.509 certificates. PEM
+parsing is a Nimbus path backed by BouncyCastle PKIX, so add
+`org.bouncycastle/bcpkix-jdk18on` at runtime when parsing PEM. EC private-key
+export includes the matching public PEM block so Nimbus can reconstruct the full
+EC JWK from PKCS#8 private material.
+
 ### Signing (`jose.jws`)
 
 ```clojure
@@ -103,6 +122,25 @@ error is `{:jose/error :missing-optional-dep}` rather than a `NoClassDefFoundErr
 (jws/verify k compact)                 ; => {:payload .. :payload-bytes .. :header ..}
 (jws/header compact)                   ; unverified header
 ```
+
+### Detached / unencoded JWS
+
+```clojure
+(def detached (jws/sign k "payload" {:detached? true}))
+(jws/verify-detached k detached "payload")
+
+(def unencoded (jws/sign k "payload" {:b64? false}))
+(jws/verify k unencoded)
+
+(def detached-unencoded
+  (jws/sign k "$.02" {:detached? true :b64? false}))
+(jws/verify-detached k detached-unencoded "$.02")
+```
+
+`:detached? true` serializes compact JWS as `header..signature`.
+`:b64? false` sets RFC 7797 `b64:false` and marks `b64` critical. Attached
+compact unencoded payloads cannot contain `.` because `.` is the compact JWS
+delimiter; use detached unencoded JWS for arbitrary payload bytes.
 
 ### Encryption (`jose.jwe`)
 
@@ -169,7 +207,7 @@ Bad input never NPEs. API and parse failures normalize to `ex-info` with a
 | `:not-a-nested-jwt` | `decrypt-then-verify` on a JWE whose payload is not a JWT |
 | `:key-source-failure` | remote JWKS fetch failed |
 | `:key-length` | symmetric key wrong size for the algorithm |
-| `:missing-optional-dep` | EdDSA/ES256K path without tink/BouncyCastle |
+| `:missing-optional-dep` | optional Tink/BouncyCastle path without its runtime dependency |
 | `:invalid-url` | bad JWKS URL |
 
 ## License

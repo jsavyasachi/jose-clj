@@ -9,11 +9,11 @@
            (java.nio.charset StandardCharsets)
            (java.security Provider Security)
            (java.text ParseException)
-           (java.util List Map)))
+           (java.util HashSet List Map)))
 
 (set! *warn-on-reflection* true)
 
-(def ^:private sign-options #{:alg :kid :headers})
+(def ^:private sign-options #{:alg :kid :headers :detached? :b64?})
 (def ^:private verify-with-jwks-options #{})
 
 (def ^:private alg-names
@@ -184,7 +184,26 @@
 (defn- jws-object
   ^JWSObject [compact]
   (try
-    (JWSObject/parse ^String compact)
+    (let [jws (JWSObject/parse ^String compact)
+          header (.getHeader jws)]
+      (if (and (false? (.isBase64URLEncodePayload header))
+               (string? compact))
+        (let [segments (str/split compact #"\." -1)]
+          (if (and (= 3 (count segments))
+                   (not (str/blank? (second segments))))
+            (JWSObject/parse ^String (str (first segments) ".." (nth segments 2))
+                             (Payload. ^String (second segments)))
+            jws))
+        jws))
+    (catch ParseException e
+      (throw (jose-ex :parse-failure "Failed to parse JWS" e {})))
+    (catch RuntimeException e
+      (throw (jose-ex :parse-failure "Failed to parse JWS" e {})))))
+
+(defn- detached-jws-object
+  ^JWSObject [compact payload]
+  (try
+    (JWSObject/parse ^String compact (->payload payload))
     (catch ParseException e
       (throw (jose-ex :parse-failure "Failed to parse JWS" e {})))
     (catch RuntimeException e
@@ -195,6 +214,13 @@
   (case k
     :cty (.contentType builder (str v))
     (.customParam builder (name k) (stringify-json-value v))))
+
+(defn- string-set
+  ^java.util.Set [xs]
+  (let [set (HashSet.)]
+    (doseq [x xs]
+      (.add set (str x)))
+    set))
 
 (defn sign
   "Signs a string or byte-array payload and returns a compact JWS string."
@@ -209,11 +235,14 @@
            kid (if (contains? opts :kid) (:kid opts) (.getKeyID key))]
        (doseq [[k v] (:headers opts)]
          (apply-header! builder k v))
+       (when (false? (:b64? opts true))
+         (.base64URLEncodePayload builder false)
+         (.criticalParams builder (string-set ["b64"])))
        (when kid
          (.keyID builder kid))
        (let [jws (JWSObject. (.build builder) (->payload payload-value))]
          (.sign jws (signer key))
-         (.serialize jws)))
+         (.serialize jws (boolean (:detached? opts false)))))
      (catch JOSEException e
        (throw (jose-ex :sign-failure "Failed to sign JWS" e {}))))))
 
@@ -232,6 +261,25 @@
          :header (header-map (.getHeader jws))}))
     (catch JOSEException e
       (throw (jose-ex :invalid-signature "Invalid JWS signature" e {})))))
+
+(defn verify-detached
+  "Verifies a detached compact JWS with an out-of-band payload."
+  ([key compact payload]
+   (verify-detached key compact payload {}))
+  ([key compact payload opts]
+   (validate-empty-options! opts)
+   (try
+     (let [jws (detached-jws-object compact payload)
+           ok? (.verify jws (verifier (jwk/parse key)))]
+       (when-not ok?
+         (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
+       (let [^Payload payload (.getPayload jws)
+             bytes (.toBytes payload)]
+         {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
+          :payload-bytes bytes
+          :header (header-map (.getHeader jws))}))
+     (catch JOSEException e
+       (throw (jose-ex :invalid-signature "Invalid JWS signature" e {}))))))
 
 (defn header
   "Returns the unverified compact JWS header as a Clojure map."
