@@ -2,7 +2,9 @@
   (:require [clojure.string :as str]
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
-  (:import (com.nimbusds.jose JOSEException JWSAlgorithm JWSHeader JWSHeader$Builder JWSObject JWSProvider Payload)
+  (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder
+                             JWSObject JWSObjectJSON JWSObjectJSON$Signature JWSProvider Payload
+                             UnprotectedHeader UnprotectedHeader$Builder)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
@@ -254,6 +256,7 @@
 (defn- apply-header!
   [^JWSHeader$Builder builder k v]
   (case k
+    :typ (.type builder (JOSEObjectType. (str v)))
     :cty (.contentType builder (str v))
     (.customParam builder (name k) (stringify-json-value v))))
 
@@ -355,3 +358,105 @@
   ([source compact opts]
    (validate-verify-options! opts)
    (verify (select-jwks-key source compact) compact opts)))
+
+(def ^:private json-options
+  #{:serialization :alg :kid :protected-headers :unprotected-headers})
+
+(defn- unprotected-header
+  ^UnprotectedHeader [headers]
+  (when (seq headers)
+    (let [builder (UnprotectedHeader$Builder.)]
+      (doseq [[k v] headers]
+        (if (= :kid k)
+          (.keyID builder (str v))
+          (.param builder (name k) (stringify-json-value v))))
+      (.build builder))))
+
+(defn- json-signer-configs
+  [key-or-signers opts]
+  (if (sequential? key-or-signers)
+    key-or-signers
+    [(assoc (dissoc opts :serialization) :key key-or-signers)]))
+
+(defn- sign-json-signature!
+  [^JWSObjectJSON object {:keys [key alg kid protected-headers unprotected-headers] :as config}]
+  (doseq [option (keys (dissoc config :key))]
+    (when-not (contains? json-options option)
+      (invalid-option! option)))
+  (let [^JWK key (jwk/parse key)
+        ^JWSHeader$Builder builder (JWSHeader$Builder. (algorithm (or alg (default-alg key))))
+        protected-kid (if (contains? config :kid)
+                        kid
+                        (when-not (contains? unprotected-headers :kid) (.getKeyID key)))]
+    (doseq [[k v] protected-headers]
+      (apply-header! builder k v))
+    (when protected-kid
+      (.keyID builder protected-kid))
+    (.sign object (.build builder) (unprotected-header unprotected-headers) (signer key))))
+
+(defn sign-json
+  "Signs flattened or general JWS JSON with protected and unprotected headers."
+  [key-or-signers payload-value opts]
+  (let [serialization (:serialization opts :flattened)
+        signers (json-signer-configs key-or-signers opts)
+        object (JWSObjectJSON. (->payload payload-value))]
+    (when-not (#{:flattened :general} serialization)
+      (invalid-option! :serialization))
+    (when (and (= :flattened serialization) (not= 1 (count signers)))
+      (invalid-option! :serialization))
+    (try
+      (doseq [config signers]
+        (sign-json-signature! object config))
+      (if (= :flattened serialization)
+        (.serializeFlattened object)
+        (.serializeGeneral object))
+      (catch JOSEException e
+        (throw (jose-ex :sign-failure "Failed to sign JWS JSON" e {}))))))
+
+(defn- jws-json-object
+  ^JWSObjectJSON [json]
+  (try
+    (JWSObjectJSON/parse ^String json)
+    (catch ParseException e
+      (throw (jose-ex :parse-failure "Failed to parse JWS JSON" e {})))
+    (catch RuntimeException e
+      (throw (jose-ex :parse-failure "Failed to parse JWS JSON" e {})))))
+
+(defn- json-candidate-keys
+  [keys kid]
+  (let [parsed (mapv jwk/parse (if (sequential? keys) keys [keys]))
+        preferred (some #(when (= kid (jwk/key-id %)) %) parsed)]
+    (cond->> parsed
+      preferred (cons preferred)
+      preferred distinct)))
+
+(defn- verify-json-signature!
+  [^JWSObjectJSON$Signature signature keys opts]
+  (let [^JWSHeader protected (.getHeader signature)
+        ^UnprotectedHeader unprotected (.getUnprotectedHeader signature)
+        kid (or (.getKeyID protected) (some-> unprotected .getKeyID))]
+    (validate-verification-policy! protected opts)
+    (when-not (some (fn [key]
+                      (try
+                        (.verify signature (verifier key))
+                        (catch JOSEException _ false)
+                        (catch RuntimeException _ false)))
+                    (json-candidate-keys keys kid))
+      (throw (jose-ex :invalid-signature "Invalid JWS JSON signature" nil {:kid kid})))
+    {:protected-header (header-map protected)
+     :unprotected-header (when unprotected
+                           (keywordize-json-value (.toJSONObject unprotected)))}))
+
+(defn verify-json
+  "Parses and verifies every signature in flattened or general JWS JSON."
+  ([keys json]
+   (verify-json keys json {}))
+  ([keys json opts]
+   (validate-verify-options! opts)
+   (let [object (jws-json-object json)
+         signatures (mapv #(verify-json-signature! % keys opts) (.getSignatures object))
+         ^Payload payload (.getPayload object)
+         bytes (.toBytes payload)]
+     {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
+      :payload-bytes bytes
+      :signatures signatures})))
