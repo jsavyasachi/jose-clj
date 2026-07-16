@@ -253,6 +253,14 @@
   [error message data]
   (throw (jose-ex error message nil data)))
 
+(defn- validate-verify-options!
+  [opts]
+  (validate-options! verify-options opts)
+  (when-not (or (contains? opts :alg) (contains? opts :algs))
+    (fail! :algorithm-unspecified
+           "Expected JWT algorithm is required; pass :algs"
+           {:option :algs})))
+
 (defn- algorithm-name
   [alg]
   (str (algorithm alg)))
@@ -267,6 +275,7 @@
               (and (contains? opts :alg)
                    (not= actual-alg (algorithm-name (:alg opts))))
               (and (contains? opts :algs)
+                   (not= :any (:algs opts))
                    (not (contains? (set (map algorithm-name (:algs opts))) actual-alg))))
       (fail! :algorithm-not-allowed "JWT algorithm is not allowed" {:alg actual-alg}))
     (when (and (contains? opts :typ) (not= (str (:typ opts)) actual-typ))
@@ -332,14 +341,14 @@
 
   Registered claims are keyword keys. Custom claims keep their string keys.
   :exp, :nbf, and :iat return java.time.Instant values. :aud returns a vector.
-  :alg or :algs constrains accepted algorithms. :typ and :cty require matching
-  headers. :crit names understood critical headers. :max-age limits token age by
-  :iat. Omitting :alg/:algs preserves the historical behavior of accepting any
-  signed algorithm supported by the key."
+  :alg or :algs is required and constrains accepted algorithms. :typ and :cty
+  require matching headers. :crit names understood critical headers. :max-age
+  limits token age by :iat. Pass {:algs :any} to unsafely accept any signed
+  algorithm supported by the key. alg:none is always rejected."
   ([key compact]
    (verify key compact {}))
   ([key compact opts]
-   (validate-options! verify-options opts)
+   (validate-verify-options! opts)
    (try
      (let [jwt (signed-jwt compact)
            header (.getHeader jwt)]
@@ -370,7 +379,7 @@
   ([source compact]
    (verify-with-jwks source compact {}))
   ([source compact opts]
-   (validate-options! verify-options opts)
+   (validate-verify-options! opts)
    (verify (select-jwks-key source compact) compact opts)))
 
 (defn- parse-claims
@@ -415,7 +424,7 @@
   ([decrypt-key verify-key compact]
    (decrypt-then-verify decrypt-key verify-key compact {}))
   ([decrypt-key verify-key compact opts]
-   (validate-options! verify-options opts)
+   (validate-verify-options! opts)
    (let [payload (:payload (jwe/decrypt decrypt-key compact))]
      (when-not (= 3 (count (str/split payload #"\.")))
        (fail! :not-a-nested-jwt "JWE payload is not a nested JWT" {}))

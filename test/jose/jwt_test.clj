@@ -30,7 +30,8 @@
                                :exp exp
                                :iat iat
                                "role" "admin"})
-        claims (jwt/verify (jwk/public-jwk key) compact {:aud "api"
+        claims (jwt/verify (jwk/public-jwk key) compact {:algs #{:rs256}
+                                                         :aud "api"
                                                          :iss "issuer"
                                                          :required [:sub "role"]})]
     (is (= "issuer" (:iss claims)))
@@ -56,7 +57,7 @@
         compact (jwt/sign key {:sub "subject"} {:now-iat? true
                                                 :expires-in 3600})
         after (Instant/now)
-        claims (jwt/verify key compact)]
+        claims (jwt/verify key compact {:algs #{:hs256}})]
     (is (not (.isBefore ^Instant (:iat claims) (.minusSeconds before 1))))
     (is (not (.isAfter ^Instant (:iat claims) after)))
     (is (= 3600 (- (.getEpochSecond ^Instant (:exp claims))
@@ -71,15 +72,15 @@
         issuer (jwt/sign key {:sub "subject" :iss "issuer" :exp (.plusSeconds now 60)})
         no-sub (jwt/sign key {:iss "issuer" :exp (.plusSeconds now 60)})
         skewed (jwt/sign key {:sub "subject" :exp (.minusSeconds now 30)})]
-    (is (= :expired (:jose/error (thrown-data #(jwt/verify key expired)))))
-    (is (= :not-yet-valid (:jose/error (thrown-data #(jwt/verify key future)))))
-    (is (= :claim-mismatch (:jose/error (thrown-data #(jwt/verify key audience {:aud "web"})))))
-    (is (= :aud (:claim (thrown-data #(jwt/verify key audience {:aud "web"})))))
-    (is (= :claim-mismatch (:jose/error (thrown-data #(jwt/verify key issuer {:iss "other"})))))
-    (is (= :iss (:claim (thrown-data #(jwt/verify key issuer {:iss "other"})))))
-    (is (= :missing-claim (:jose/error (thrown-data #(jwt/verify key no-sub {:required [:sub]})))))
-    (is (= :sub (:claim (thrown-data #(jwt/verify key no-sub {:required [:sub]})))))
-    (is (= "subject" (:sub (jwt/verify key skewed {:clock-skew 60}))))))
+    (is (= :expired (:jose/error (thrown-data #(jwt/verify key expired {:algs #{:hs256}})))))
+    (is (= :not-yet-valid (:jose/error (thrown-data #(jwt/verify key future {:algs #{:hs256}})))))
+    (is (= :claim-mismatch (:jose/error (thrown-data #(jwt/verify key audience {:algs #{:hs256} :aud "web"})))))
+    (is (= :aud (:claim (thrown-data #(jwt/verify key audience {:algs #{:hs256} :aud "web"})))))
+    (is (= :claim-mismatch (:jose/error (thrown-data #(jwt/verify key issuer {:algs #{:hs256} :iss "other"})))))
+    (is (= :iss (:claim (thrown-data #(jwt/verify key issuer {:algs #{:hs256} :iss "other"})))))
+    (is (= :missing-claim (:jose/error (thrown-data #(jwt/verify key no-sub {:algs #{:hs256} :required [:sub]})))))
+    (is (= :sub (:claim (thrown-data #(jwt/verify key no-sub {:algs #{:hs256} :required [:sub]})))))
+    (is (= "subject" (:sub (jwt/verify key skewed {:algs #{:hs256} :clock-skew 60}))))))
 
 (deftest verify-with-jwks-selects-key-and-validates-claims
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
@@ -87,34 +88,38 @@
         key-c (jwk/generate :rsa {:kid "c" :use :sig :alg :rs256})
         source (jwks/local-source [(jwk/public-jwk key-a) (jwk/public-jwk key-b)])
         compact (jwt/sign key-a {:sub "subject" :aud ["api"] :exp 2051222400})]
-    (is (= "subject" (:sub (jwt/verify-with-jwks source compact {:aud "api"}))))
+    (is (= "subject" (:sub (jwt/verify-with-jwks source compact {:algs #{:rs256} :aud "api"}))))
     (is (= :claim-mismatch
-           (:jose/error (thrown-data #(jwt/verify-with-jwks source compact {:aud "web"})))))
+           (:jose/error (thrown-data #(jwt/verify-with-jwks source compact {:algs #{:rs256} :aud "web"})))))
     (is (= :key-not-found
            (:jose/error (thrown-data #(jwt/verify-with-jwks source
                                                             (jwt/sign key-c {:sub "subject"
-                                                                             :exp 2051222400}))))))
+                                                                             :exp 2051222400})
+                                                            {:algs #{:rs256}})))))
     (is (= :ambiguous-key
            (:jose/error (thrown-data #(jwt/verify-with-jwks source
                                                             (jwt/sign key-a
                                                                       {:sub "subject"
                                                                        :exp 2051222400}
-                                                                      {:kid nil}))))))))
+                                                                      {:kid nil})
+                                                            {:algs #{:rs256}})))))))
 
 (deftest invalid-signatures-and-input
   (let [key (jwk/generate :oct {:size 256})
         other (jwk/generate :oct {:size 256})
         compact (jwt/sign key {:sub "subject" :exp 2051222400})]
     (is (= :invalid-signature
-           (:jose/error (thrown-data #(jwt/verify other compact)))))
+           (:jose/error (thrown-data #(jwt/verify other compact {:algs #{:hs256}})))))
     (is (= :parse-failure
-           (:jose/error (thrown-data #(jwt/verify key "not-a-jwt")))))))
+           (:jose/error (thrown-data #(jwt/verify key "not-a-jwt" {:algs #{:hs256}})))))))
 
 (deftest verification-policy-rejects-algorithm-substitution
   (let [key (jwk/generate :oct {:size 512})
         intended (jwt/sign key {:sub "subject" :exp 2051222400} {:alg :hs256})
         substituted (jwt/sign key {:sub "subject" :exp 2051222400} {:alg :hs512})]
-    (is (= "subject" (:sub (jwt/verify key substituted))))
+    (is (= :algorithm-unspecified
+           (:jose/error (thrown-data #(jwt/verify key substituted)))))
+    (is (= "subject" (:sub (jwt/verify key substituted {:algs :any}))))
     (is (= "subject" (:sub (jwt/verify key intended {:algs #{:hs256}}))))
     (is (= "subject" (:sub (jwt/verify key intended {:alg "HS256"}))))
     (is (= :algorithm-not-allowed
@@ -127,17 +132,18 @@
                           {:sub "subject" :iat (.minusSeconds now 120) :exp 2051222400}
                           {:headers {:typ "JWT" :cty "application/example"}})
         no-iat (jwt/sign key {:sub "subject" :exp 2051222400})]
-    (is (= "subject" (:sub (jwt/verify key compact {:typ "JWT"
+    (is (= "subject" (:sub (jwt/verify key compact {:algs #{:hs256}
+                                                     :typ "JWT"
                                                      :cty "application/example"
                                                      :max-age 180}))))
     (is (= :header-mismatch
-           (:jose/error (thrown-data #(jwt/verify key compact {:typ "JOSE"})))))
+           (:jose/error (thrown-data #(jwt/verify key compact {:algs #{:hs256} :typ "JOSE"})))))
     (is (= :header-mismatch
-           (:jose/error (thrown-data #(jwt/verify key compact {:cty "application/json"})))))
+           (:jose/error (thrown-data #(jwt/verify key compact {:algs #{:hs256} :cty "application/json"})))))
     (is (= :too-old
-           (:jose/error (thrown-data #(jwt/verify key compact {:max-age 60})))))
+           (:jose/error (thrown-data #(jwt/verify key compact {:algs #{:hs256} :max-age 60})))))
     (is (= :missing-claim
-           (:jose/error (thrown-data #(jwt/verify key no-iat {:max-age 60})))))))
+           (:jose/error (thrown-data #(jwt/verify key no-iat {:algs #{:hs256} :max-age 60})))))))
 
 (deftest invalid-options-are-rejected
   (let [key (jwk/generate :oct {:size 256})]
@@ -148,9 +154,9 @@
              (:option (thrown-data #(jwt/sign key {:sub "subject"} {:unknown true}))))))
     (testing "verify"
       (is (= :invalid-option
-             (:jose/error (thrown-data #(jwt/verify key (jwt/sign key {:sub "subject"}) {:unknown true})))))
+             (:jose/error (thrown-data #(jwt/verify key (jwt/sign key {:sub "subject"}) {:algs #{:hs256} :unknown true})))))
       (is (= :unknown
-             (:option (thrown-data #(jwt/verify key (jwt/sign key {:sub "subject"}) {:unknown true}))))))))
+             (:option (thrown-data #(jwt/verify key (jwt/sign key {:sub "subject"}) {:algs #{:hs256} :unknown true}))))))))
 
 (deftest encrypt-and-decrypt-claims
   (let [key (jwk/generate :rsa {:kid "jwt-jwe"})
@@ -181,18 +187,18 @@
     (is (= "JWT" (:cty (jwe/header compact))))
     (is (= 3 (count (str/split inner #"\."))))
     (is (= "subject"
-           (:sub (jwt/decrypt-then-verify encrypt-key sign-key compact {:aud "api"}))))
+           (:sub (jwt/decrypt-then-verify encrypt-key sign-key compact {:algs #{:hs256} :aud "api"}))))
     (is (= :invalid-signature
            (:jose/error (thrown-data #(jwt/decrypt-then-verify encrypt-key
                                                                (jwk/generate :oct {:size 256})
                                                                compact
-                                                               {:aud "api"})))))))
+                                                               {:algs #{:hs256} :aud "api"})))))))
 
 (deftest nested-jwt-rejects-non-jwt-payload
   (let [key (jwk/generate :oct {:size 256})
         compact (jwe/encrypt key "not-a-jwt" {:alg :dir :headers {:cty "JWT"}})]
     (is (= :not-a-nested-jwt
-           (:jose/error (thrown-data #(jwt/decrypt-then-verify key key compact)))))))
+           (:jose/error (thrown-data #(jwt/decrypt-then-verify key key compact {:algs #{:hs256}})))))))
 
 (deftest nested-jwt-rejects-tampered-inner-signature
   (let [sign-key (jwk/generate :oct {:size 256})
@@ -203,4 +209,5 @@
     (is (= :invalid-signature
            (:jose/error (thrown-data #(jwt/decrypt-then-verify encrypt-key
                                                                sign-key
-                                                               compact)))))))
+                                                               compact
+                                                               {:algs #{:hs256}})))))))

@@ -55,7 +55,12 @@
   [opts]
   (doseq [option (keys opts)]
     (when-not (contains? verify-options option)
-      (invalid-option! option))))
+      (invalid-option! option)))
+  (when-not (or (contains? opts :alg) (contains? opts :algs))
+    (throw (jose-ex :algorithm-unspecified
+                    "Expected JWS algorithm is required; pass :algs"
+                    nil
+                    {:option :algs}))))
 
 (defn- algorithm
   ^JWSAlgorithm [alg]
@@ -128,6 +133,7 @@
               (and (contains? opts :alg)
                    (not= actual-alg (algorithm-name (:alg opts))))
               (and (contains? opts :algs)
+                   (not= :any (:algs opts))
                    (not (contains? (set (map algorithm-name (:algs opts))) actual-alg))))
       (fail! :algorithm-not-allowed "JWS algorithm is not allowed" {:alg (alg-keyword actual-alg)}))
     (when (and (contains? opts :typ) (not= (str (:typ opts)) actual-typ))
@@ -285,9 +291,10 @@
 (defn verify
   "Verifies a compact JWS and returns {:payload string :payload-bytes bytes :header map}.
 
-  :alg or :algs constrains accepted algorithms. :typ and :cty require matching
-  headers. :crit names understood critical headers. Omitting :alg/:algs preserves
-  the historical behavior of accepting any signed algorithm supported by the key."
+  :alg or :algs is required and constrains accepted algorithms. :typ and :cty
+  require matching headers. :crit names understood critical headers. Pass
+  {:algs :any} to unsafely accept any signed algorithm supported by the key.
+  alg:none is always rejected."
   ([key compact]
    (verify key compact {}))
   ([key compact opts]
@@ -308,7 +315,7 @@
 (defn verify-detached
   "Verifies a detached compact JWS with an out-of-band payload.
 
-  Accepts the same optional verification policy as verify."
+  Accepts the same required algorithm policy and optional header policy as verify."
   ([key compact payload]
    (verify-detached key compact payload {}))
   ([key compact payload opts]

@@ -89,12 +89,12 @@
       (.generate)))
 
 (deftest rfc-verification-vectors
-  (doseq [[label key compact payload] [["RFC 7515 A.1" rfc-7515-a1-oct-jwk rfc-7515-a1-compact rfc-jws-payload]
-                                       ["RFC 7515 A.2" rfc-7515-a2-rsa-jwk rfc-7515-a2-compact rfc-jws-payload]
-                                       ["RFC 7515 A.3" rfc-7515-a3-ec-jwk rfc-7515-a3-compact rfc-jws-payload]
-                                       ["RFC 8037 A.4" rfc-8037-a4-ed25519-jwk rfc-8037-a4-compact "Example of Ed25519 signing"]]]
+  (doseq [[label key compact payload alg] [["RFC 7515 A.1" rfc-7515-a1-oct-jwk rfc-7515-a1-compact rfc-jws-payload :hs256]
+                                           ["RFC 7515 A.2" rfc-7515-a2-rsa-jwk rfc-7515-a2-compact rfc-jws-payload :rs256]
+                                           ["RFC 7515 A.3" rfc-7515-a3-ec-jwk rfc-7515-a3-compact rfc-jws-payload :es256]
+                                           ["RFC 8037 A.4" rfc-8037-a4-ed25519-jwk rfc-8037-a4-compact "Example of Ed25519 signing" :eddsa]]]
     (testing label
-      (let [result (jws/verify key compact)]
+      (let [result (jws/verify key compact {:algs #{alg}})]
         (is (= payload (:payload result)))
         (is (= (vec (.getBytes ^String payload StandardCharsets/UTF_8))
                (vec (:payload-bytes result))))))))
@@ -109,7 +109,7 @@
     (testing kty
       (let [key (jwk/generate kty opts)
             compact (jws/sign key "hello" {:headers {:cty "text/plain"}})
-            result (jws/verify key compact)]
+            result (jws/verify key compact {:algs #{alg}})]
         (is (= "hello" (:payload result)))
         (is (= alg (get-in result [:header :alg])))
         (is (= (:kid opts) (get-in result [:header :kid])))
@@ -117,7 +117,7 @@
   (testing :secp256k1
     (let [key (secp256k1-key)
           compact (jws/sign key "hello")
-          result (jws/verify key compact)]
+          result (jws/verify key compact {:algs #{:es256k}})]
       (is (= "hello" (:payload result)))
       (is (= :es256k (get-in result [:header :alg])))
       (is (= "ec-k" (get-in result [:header :kid]))))))
@@ -129,31 +129,35 @@
                                                    :headers {:example "ok"}})]
     (is (= {:alg :rs512 :kid "explicit" :example "ok"}
            (jws/header compact)))
-    (is (= "hello" (:payload (jws/verify (jwk/public-jwk key) compact))))))
+    (is (= "hello" (:payload (jws/verify (jwk/public-jwk key) compact {:algs #{:rs512}}))))))
 
 (deftest verification-policy
   (let [key (jwk/generate :oct {:size 512})
         intended (jws/sign key "hello" {:alg :hs256 :headers {:cty "text/plain"}})
         substituted (jws/sign key "hello" {:alg :hs512})]
-    (is (= "hello" (:payload (jws/verify key substituted))))
+    (is (= :algorithm-unspecified
+           (:jose/error (thrown-data #(jws/verify key substituted)))))
+    (is (= "hello" (:payload (jws/verify key substituted {:algs :any}))))
     (is (= "hello" (:payload (jws/verify key intended {:alg :hs256
                                                          :cty "text/plain"}))))
     (is (= :algorithm-not-allowed
            (:jose/error (thrown-data #(jws/verify key substituted {:algs #{:hs256}})))))
     (is (= :header-mismatch
-           (:jose/error (thrown-data #(jws/verify key intended {:cty "application/json"})))))
+           (:jose/error (thrown-data #(jws/verify key intended {:algs #{:hs256}
+                                                                 :cty "application/json"})))))
     (is (= rfc-jws-payload
            (:payload (jws/verify rfc-7515-a1-oct-jwk rfc-7515-a1-compact {:typ "JWT"
                                                                          :alg "HS256"}))))
     (is (= :header-mismatch
            (:jose/error (thrown-data #(jws/verify rfc-7515-a1-oct-jwk
                                                   rfc-7515-a1-compact
-                                                  {:typ "JOSE"})))))))
+                                                  {:algs #{:hs256}
+                                                   :typ "JOSE"})))))))
 
 (deftest binary-payloads-return-bytes
   (let [key (jwk/generate :oct {:size 256})
         bytes (byte-array [0 1 2 -1])
-        result (jws/verify key (jws/sign key bytes))]
+        result (jws/verify key (jws/sign key bytes) {:algs #{:hs256}})]
     (is (= [0 1 2 -1] (vec (:payload-bytes result))))
     (is (= "\u0000\u0001\u0002�" (:payload result)))))
 
@@ -163,22 +167,24 @@
         segments (clojure.string/split compact #"\." -1)]
     (is (= 3 (count segments)))
     (is (= "" (second segments)))
-    (is (= "hello" (:payload (jws/verify-detached key compact "hello"))))
+    (is (= "hello" (:payload (jws/verify-detached key compact "hello" {:algs #{:hs256}}))))
     (is (= :invalid-signature
-           (:jose/error (thrown-data #(jws/verify-detached key compact "tampered")))))))
+           (:jose/error (thrown-data #(jws/verify-detached key compact "tampered" {:algs #{:hs256}})))))))
 
 (deftest unencoded-jws-round-trips
   (let [key (jwk/generate :oct {:size 256})
         attached (jws/sign key "hello" {:b64? false})
         detached (jws/sign key "$.02" {:detached? true :b64? false})]
     (is (clojure.string/includes? attached ".hello."))
-    (is (= "hello" (:payload (jws/verify key attached))))
-    (is (= "$.02" (:payload (jws/verify-detached key detached "$.02"))))
+    (is (= "hello" (:payload (jws/verify key attached {:algs #{:hs256}}))))
+    (is (= "$.02" (:payload (jws/verify-detached key detached "$.02" {:algs #{:hs256}}))))
     (is (= false (get-in (jws/header attached) [:b64])))
     (is (= ["b64"] (get-in (jws/header attached) [:crit])))
-    (is (= "hello" (:payload (jws/verify key attached {:crit #{"b64"}}))))
+    (is (= "hello" (:payload (jws/verify key attached {:algs #{:hs256}
+                                                         :crit #{"b64"}}))))
     (is (= :unsupported-critical-header
-           (:jose/error (thrown-data #(jws/verify key attached {:crit #{}})))))))
+           (:jose/error (thrown-data #(jws/verify key attached {:algs #{:hs256}
+                                                                 :crit #{}})))))))
 
 (deftest verify-with-jwks-selects-key
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
@@ -186,15 +192,17 @@
         key-c (jwk/generate :rsa {:kid "c" :use :sig :alg :rs256})
         source (jwks/local-source [(jwk/public-jwk key-a) (jwk/public-jwk key-b)])
         compact (jws/sign key-a "hello")]
-    (is (= "hello" (:payload (jws/verify-with-jwks source compact))))
+    (is (= "hello" (:payload (jws/verify-with-jwks source compact {:algs #{:rs256}}))))
     (is (= "hello" (:payload (jws/verify-with-jwks source compact {:alg :rs256}))))
-    (is (= "a" (get-in (jws/verify-with-jwks source compact) [:header :kid])))
+    (is (= "a" (get-in (jws/verify-with-jwks source compact {:algs #{:rs256}}) [:header :kid])))
     (is (= :key-not-found
            (:jose/error (thrown-data #(jws/verify-with-jwks source
-                                                            (jws/sign key-c "hello"))))))
+                                                            (jws/sign key-c "hello")
+                                                            {:algs #{:rs256}})))))
     (is (= :ambiguous-key
            (:jose/error (thrown-data #(jws/verify-with-jwks source
-                                                            (jws/sign key-a "hello" {:kid nil}))))))))
+                                                            (jws/sign key-a "hello" {:kid nil})
+                                                            {:algs #{:rs256}})))))))
 
 (deftest alg-confusion-attack-is-rejected
   ;; A JWKS serves only an RSA public key, with no "alg" param (as many real
@@ -211,7 +219,8 @@
                        (.build))
         forged (jws/sign forged-key "pwned" {:alg :hs256})]
     (is (contains? #{:key-not-found :invalid-signature}
-                   (:jose/error (thrown-data #(jws/verify-with-jwks source forged)))))))
+                   (:jose/error (thrown-data #(jws/verify-with-jwks source forged
+                                                                    {:algs #{:rs256}})))))))
 
 (deftest unsecured-alg-none-token-is-rejected
   ;; The classic "alg":"none" forgery: a header of {"alg":"none"} with an empty
@@ -222,17 +231,17 @@
                   (.encodeToString (.getBytes s StandardCharsets/UTF_8))))
         forged (str (b64 "{\"alg\":\"none\"}") "." (b64 "{\"sub\":\"attacker\"}") ".")
         key (jwk/generate :rsa {:kid "a"})]
-    (is (contains? #{:parse-failure :invalid-signature}
-                   (:jose/error (thrown-data #(jws/verify key forged)))))))
+    (is (contains? #{:parse-failure :algorithm-not-allowed}
+                   (:jose/error (thrown-data #(jws/verify key forged {:algs :any})))))))
 
 (deftest failures-are-ex-info
   (let [key (jwk/generate :oct {:size 256})
         compact (jws/sign key "hello")
         tampered (str compact "x")]
     (is (= :invalid-signature
-           (:jose/error (thrown-data #(jws/verify key tampered)))))
+           (:jose/error (thrown-data #(jws/verify key tampered {:algs #{:hs256}})))))
     (is (= :parse-failure
-           (:jose/error (thrown-data #(jws/verify key "not-a-jws")))))
+           (:jose/error (thrown-data #(jws/verify key "not-a-jws" {:algs #{:hs256}})))))
     (is (= :invalid-option
            (:jose/error (thrown-data #(jws/sign key "hello" {:unknown true})))))
     (is (= :unknown
