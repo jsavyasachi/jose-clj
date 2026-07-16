@@ -14,7 +14,7 @@
 (set! *warn-on-reflection* true)
 
 (def ^:private sign-options #{:alg :kid :headers :detached? :b64?})
-(def ^:private verify-with-jwks-options #{})
+(def ^:private verify-options #{:alg :algs :typ :cty :crit})
 
 (def ^:private alg-names
   {:hs256 "HS256"
@@ -51,10 +51,10 @@
     (when-not (contains? sign-options option)
       (invalid-option! option))))
 
-(defn- validate-empty-options!
+(defn- validate-verify-options!
   [opts]
   (doseq [option (keys opts)]
-    (when-not (contains? verify-with-jwks-options option)
+    (when-not (contains? verify-options option)
       (invalid-option! option))))
 
 (defn- algorithm
@@ -109,6 +109,42 @@
 (defn- header-map
   [^JWSHeader header]
   (update (keywordize-json-value (.toJSONObject header)) :alg alg-keyword))
+
+(defn- fail!
+  [error message data]
+  (throw (jose-ex error message nil data)))
+
+(defn- algorithm-name
+  [alg]
+  (str (algorithm alg)))
+
+(defn- validate-verification-policy!
+  [^JWSHeader header opts]
+  (let [actual-alg (str (.getAlgorithm header))
+        actual-typ (some-> (.getType header) str)
+        actual-cty (.getContentType header)
+        critical (set (.getCriticalParams header))]
+    (when (or (= "none" (str/lower-case actual-alg))
+              (and (contains? opts :alg)
+                   (not= actual-alg (algorithm-name (:alg opts))))
+              (and (contains? opts :algs)
+                   (not (contains? (set (map algorithm-name (:algs opts))) actual-alg))))
+      (fail! :algorithm-not-allowed "JWS algorithm is not allowed" {:alg (alg-keyword actual-alg)}))
+    (when (and (contains? opts :typ) (not= (str (:typ opts)) actual-typ))
+      (fail! :header-mismatch "JWS typ header does not match" {:header :typ
+                                                                :expected (str (:typ opts))
+                                                                :actual actual-typ}))
+    (when (and (contains? opts :cty) (not= (str (:cty opts)) actual-cty))
+      (fail! :header-mismatch "JWS cty header does not match" {:header :cty
+                                                                :expected (str (:cty opts))
+                                                                :actual actual-cty}))
+    (when (contains? opts :crit)
+      (let [understood (set (map #(if (keyword? %) (name %) (str %)) (:crit opts)))
+            unsupported (seq (remove understood critical))]
+        (when unsupported
+          (fail! :unsupported-critical-header
+                 "JWS contains unsupported critical headers"
+                 {:headers (set unsupported)}))))))
 
 (defn- ->payload
   ^Payload [payload]
@@ -247,31 +283,40 @@
        (throw (jose-ex :sign-failure "Failed to sign JWS" e {}))))))
 
 (defn verify
-  "Verifies a compact JWS and returns {:payload string :payload-bytes bytes :header map}."
-  [key compact]
-  (try
-    (let [jws (jws-object compact)
-          ok? (.verify jws (verifier (jwk/parse key)))]
-      (when-not ok?
-        (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
-      (let [^Payload payload (.getPayload jws)
-            bytes (.toBytes payload)]
-        {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
-         :payload-bytes bytes
-         :header (header-map (.getHeader jws))}))
-    (catch JOSEException e
-      (throw (jose-ex :invalid-signature "Invalid JWS signature" e {})))))
+  "Verifies a compact JWS and returns {:payload string :payload-bytes bytes :header map}.
+
+  :alg or :algs constrains accepted algorithms. :typ and :cty require matching
+  headers. :crit names understood critical headers. Omitting :alg/:algs preserves
+  the historical behavior of accepting any signed algorithm supported by the key."
+  ([key compact]
+   (verify key compact {}))
+  ([key compact opts]
+   (validate-verify-options! opts)
+   (try
+     (let [jws (jws-object compact)]
+       (validate-verification-policy! (.getHeader jws) opts)
+       (when-not (.verify jws (verifier (jwk/parse key)))
+         (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
+       (let [^Payload payload (.getPayload jws)
+             bytes (.toBytes payload)]
+         {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
+          :payload-bytes bytes
+          :header (header-map (.getHeader jws))}))
+     (catch JOSEException e
+       (throw (jose-ex :invalid-signature "Invalid JWS signature" e {}))))))
 
 (defn verify-detached
-  "Verifies a detached compact JWS with an out-of-band payload."
+  "Verifies a detached compact JWS with an out-of-band payload.
+
+  Accepts the same optional verification policy as verify."
   ([key compact payload]
    (verify-detached key compact payload {}))
   ([key compact payload opts]
-   (validate-empty-options! opts)
+   (validate-verify-options! opts)
    (try
-     (let [jws (detached-jws-object compact payload)
-           ok? (.verify jws (verifier (jwk/parse key)))]
-       (when-not ok?
+     (let [jws (detached-jws-object compact payload)]
+       (validate-verification-policy! (.getHeader jws) opts)
+       (when-not (.verify jws (verifier (jwk/parse key)))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -301,5 +346,5 @@
   ([source compact]
    (verify-with-jwks source compact {}))
   ([source compact opts]
-   (validate-empty-options! opts)
-   (verify (select-jwks-key source compact) compact)))
+   (validate-verify-options! opts)
+   (verify (select-jwks-key source compact) compact opts)))

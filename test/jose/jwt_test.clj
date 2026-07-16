@@ -110,6 +110,35 @@
     (is (= :parse-failure
            (:jose/error (thrown-data #(jwt/verify key "not-a-jwt")))))))
 
+(deftest verification-policy-rejects-algorithm-substitution
+  (let [key (jwk/generate :oct {:size 512})
+        intended (jwt/sign key {:sub "subject" :exp 2051222400} {:alg :hs256})
+        substituted (jwt/sign key {:sub "subject" :exp 2051222400} {:alg :hs512})]
+    (is (= "subject" (:sub (jwt/verify key substituted))))
+    (is (= "subject" (:sub (jwt/verify key intended {:algs #{:hs256}}))))
+    (is (= "subject" (:sub (jwt/verify key intended {:alg "HS256"}))))
+    (is (= :algorithm-not-allowed
+           (:jose/error (thrown-data #(jwt/verify key substituted {:algs #{:hs256}})))))))
+
+(deftest verification-policy-validates-headers-and-token-age
+  (let [key (jwk/generate :oct {:size 256})
+        now (Instant/now)
+        compact (jwt/sign key
+                          {:sub "subject" :iat (.minusSeconds now 120) :exp 2051222400}
+                          {:headers {:typ "JWT" :cty "application/example"}})
+        no-iat (jwt/sign key {:sub "subject" :exp 2051222400})]
+    (is (= "subject" (:sub (jwt/verify key compact {:typ "JWT"
+                                                     :cty "application/example"
+                                                     :max-age 180}))))
+    (is (= :header-mismatch
+           (:jose/error (thrown-data #(jwt/verify key compact {:typ "JOSE"})))))
+    (is (= :header-mismatch
+           (:jose/error (thrown-data #(jwt/verify key compact {:cty "application/json"})))))
+    (is (= :too-old
+           (:jose/error (thrown-data #(jwt/verify key compact {:max-age 60})))))
+    (is (= :missing-claim
+           (:jose/error (thrown-data #(jwt/verify key no-iat {:max-age 60})))))))
+
 (deftest invalid-options-are-rejected
   (let [key (jwk/generate :oct {:size 256})]
     (testing "sign"

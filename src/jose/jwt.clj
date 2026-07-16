@@ -3,7 +3,7 @@
             [jose.jwe :as jwe]
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
-  (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader$Builder JWSProvider)
+  (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder JWSProvider)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
@@ -18,7 +18,8 @@
 (def ^:private sign-options #{:alg :kid :headers :now-iat? :expires-in})
 (def ^:private encrypt-options #{:alg :enc :kid :headers :now-iat? :expires-in})
 (def ^:private jwe-options #{:alg :enc :kid :headers})
-(def ^:private verify-options #{:aud :iss :clock-skew :required})
+(def ^:private claim-verification-options #{:aud :iss :clock-skew :required :max-age})
+(def ^:private verify-options (into claim-verification-options #{:alg :algs :typ :cty :crit}))
 (def ^:private registered-claims #{"iss" "sub" "aud" "exp" "nbf" "iat" "jti"})
 
 (def ^:private alg-names
@@ -252,6 +253,38 @@
   [error message data]
   (throw (jose-ex error message nil data)))
 
+(defn- algorithm-name
+  [alg]
+  (str (algorithm alg)))
+
+(defn- validate-verification-policy!
+  [^JWSHeader header opts]
+  (let [actual-alg (str (.getAlgorithm header))
+        actual-typ (some-> (.getType header) str)
+        actual-cty (.getContentType header)
+        critical (set (.getCriticalParams header))]
+    (when (or (= "none" (str/lower-case actual-alg))
+              (and (contains? opts :alg)
+                   (not= actual-alg (algorithm-name (:alg opts))))
+              (and (contains? opts :algs)
+                   (not (contains? (set (map algorithm-name (:algs opts))) actual-alg))))
+      (fail! :algorithm-not-allowed "JWT algorithm is not allowed" {:alg actual-alg}))
+    (when (and (contains? opts :typ) (not= (str (:typ opts)) actual-typ))
+      (fail! :header-mismatch "JWT typ header does not match" {:header :typ
+                                                                :expected (str (:typ opts))
+                                                                :actual actual-typ}))
+    (when (and (contains? opts :cty) (not= (str (:cty opts)) actual-cty))
+      (fail! :header-mismatch "JWT cty header does not match" {:header :cty
+                                                                :expected (str (:cty opts))
+                                                                :actual actual-cty}))
+    (when (contains? opts :crit)
+      (let [understood (set (map #(if (keyword? %) (name %) (str %)) (:crit opts)))
+            unsupported (seq (remove understood critical))]
+        (when unsupported
+          (fail! :unsupported-critical-header
+                 "JWT contains unsupported critical headers"
+                 {:headers (set unsupported)}))))))
+
 (defn- require-claim!
   [claims claim]
   (let [k (if (keyword? claim) claim (str claim))]
@@ -278,6 +311,13 @@
         (fail! :claim-mismatch "JWT issuer does not match" {:claim :iss
                                                             :expected expected
                                                             :actual (:iss claims)})))
+    (when (contains? opts :max-age)
+      (let [iat (:iat claims)]
+        (when-not iat
+          (fail! :missing-claim "Missing required JWT claim" {:claim :iat}))
+        (when (.isBefore ^Instant iat (.minusSeconds now (+ (long (:max-age opts)) skew)))
+          (fail! :too-old "JWT exceeds maximum age" {:claim :iat
+                                                      :max-age (:max-age opts)}))))
     (doseq [claim (:required opts)]
       (require-claim! claims claim))))
 
@@ -291,15 +331,20 @@
   "Verifies a compact signed JWT and returns claims.
 
   Registered claims are keyword keys. Custom claims keep their string keys.
-  :exp, :nbf, and :iat return java.time.Instant values. :aud returns a vector."
+  :exp, :nbf, and :iat return java.time.Instant values. :aud returns a vector.
+  :alg or :algs constrains accepted algorithms. :typ and :cty require matching
+  headers. :crit names understood critical headers. :max-age limits token age by
+  :iat. Omitting :alg/:algs preserves the historical behavior of accepting any
+  signed algorithm supported by the key."
   ([key compact]
    (verify key compact {}))
   ([key compact opts]
    (validate-options! verify-options opts)
    (try
      (let [jwt (signed-jwt compact)
-           ok? (.verify jwt (verifier (jwk/parse key)))]
-       (when-not ok?
+           header (.getHeader jwt)]
+       (validate-verification-policy! header opts)
+       (when-not (.verify jwt (verifier (jwk/parse key)))
          (throw (jose-ex :invalid-signature "Invalid JWT signature" nil {})))
        (validated-claims (.getJWTClaimsSet jwt) opts))
      (catch JOSEException e
@@ -353,7 +398,7 @@
   ([key compact]
    (decrypt key compact {}))
   ([key compact opts]
-   (validate-options! verify-options opts)
+   (validate-options! claim-verification-options opts)
    (validated-claims (parse-claims (:payload (jwe/decrypt key compact))) opts)))
 
 (defn sign-then-encrypt

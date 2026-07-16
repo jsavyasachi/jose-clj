@@ -131,6 +131,25 @@
            (jws/header compact)))
     (is (= "hello" (:payload (jws/verify (jwk/public-jwk key) compact))))))
 
+(deftest verification-policy
+  (let [key (jwk/generate :oct {:size 512})
+        intended (jws/sign key "hello" {:alg :hs256 :headers {:cty "text/plain"}})
+        substituted (jws/sign key "hello" {:alg :hs512})]
+    (is (= "hello" (:payload (jws/verify key substituted))))
+    (is (= "hello" (:payload (jws/verify key intended {:alg :hs256
+                                                         :cty "text/plain"}))))
+    (is (= :algorithm-not-allowed
+           (:jose/error (thrown-data #(jws/verify key substituted {:algs #{:hs256}})))))
+    (is (= :header-mismatch
+           (:jose/error (thrown-data #(jws/verify key intended {:cty "application/json"})))))
+    (is (= rfc-jws-payload
+           (:payload (jws/verify rfc-7515-a1-oct-jwk rfc-7515-a1-compact {:typ "JWT"
+                                                                         :alg "HS256"}))))
+    (is (= :header-mismatch
+           (:jose/error (thrown-data #(jws/verify rfc-7515-a1-oct-jwk
+                                                  rfc-7515-a1-compact
+                                                  {:typ "JOSE"})))))))
+
 (deftest binary-payloads-return-bytes
   (let [key (jwk/generate :oct {:size 256})
         bytes (byte-array [0 1 2 -1])
@@ -156,7 +175,10 @@
     (is (= "hello" (:payload (jws/verify key attached))))
     (is (= "$.02" (:payload (jws/verify-detached key detached "$.02"))))
     (is (= false (get-in (jws/header attached) [:b64])))
-    (is (= ["b64"] (get-in (jws/header attached) [:crit])))))
+    (is (= ["b64"] (get-in (jws/header attached) [:crit])))
+    (is (= "hello" (:payload (jws/verify key attached {:crit #{"b64"}}))))
+    (is (= :unsupported-critical-header
+           (:jose/error (thrown-data #(jws/verify key attached {:crit #{}})))))))
 
 (deftest verify-with-jwks-selects-key
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
@@ -165,6 +187,7 @@
         source (jwks/local-source [(jwk/public-jwk key-a) (jwk/public-jwk key-b)])
         compact (jws/sign key-a "hello")]
     (is (= "hello" (:payload (jws/verify-with-jwks source compact))))
+    (is (= "hello" (:payload (jws/verify-with-jwks source compact {:alg :rs256}))))
     (is (= "a" (get-in (jws/verify-with-jwks source compact) [:header :kid])))
     (is (= :key-not-found
            (:jose/error (thrown-data #(jws/verify-with-jwks source
