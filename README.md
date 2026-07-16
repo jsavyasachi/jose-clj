@@ -32,13 +32,13 @@ Nimbus and stay correct as it is updated.
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.2.0"}
+net.clojars.savya/jose-clj {:mvn/version "0.4.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/jose-clj "0.2.0"]
+[net.clojars.savya/jose-clj "0.4.0"]
 ```
 
 Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. Because jose-clj is a thin wrapper,
@@ -144,15 +144,42 @@ delimiter; use detached unencoded JWS for arbitrary payload bytes.
 
 ### Encryption (`jose.jwe`)
 
-Full algorithm matrix: `:rsa-oaep-256/384/512`, `:ecdh-es` (and `+a128/192/256kw`),
-`:a128/192/256kw`, `:a128/192/256gcmkw`, `:dir`; encryption methods
-`:a128/192/256cbc-hs256/384/512` and `:a128/192/256gcm`. The insecure RSA1_5 is
-deliberately not offered.
+Full algorithm matrix: `:rsa-oaep-256/384/512`, `:ecdh-es` and `:ecdh-1pu`
+(each with `+a128/192/256kw` variants), `:pbes2-hs256+a128kw`,
+`:pbes2-hs384+a192kw`, `:pbes2-hs512+a256kw`, `:a128/192/256kw`,
+`:a128/192/256gcmkw`, and `:dir`; encryption methods
+`:a128/192/256cbc-hs256/384/512`, `:a128/192/256gcm`, and `:xc20p`. The insecure
+RSA1_5 is deliberately not offered.
 
 ```clojure
 (jwe/encrypt k "payload" {:alg :rsa-oaep-256 :enc :a256gcm})
 (jwe/decrypt k compact)                ; => {:payload .. :payload-bytes .. :header ..}
 ```
+
+### JSON serialization
+
+Compact serialization remains the default for `sign` and `encrypt`. The JSON APIs
+support flattened serialization for one signature or recipient, and general
+serialization for multiple signatures or recipients:
+
+```clojure
+(def signed-json
+  (jws/sign-json k "payload" {:serialization :flattened}))
+(jws/verify-json k signed-json {:algs #{:rs256}})
+
+(def encrypted-json
+  (jwe/encrypt-json [(jwk/public-jwk recipient-1)
+                     (jwk/public-jwk recipient-2)]
+                    "payload"
+                    {:serialization :general
+                     :alg :rsa-oaep-256
+                     :enc :a256gcm}))
+(jwe/decrypt-json recipient-1 encrypted-json)
+```
+
+`sign-json` accepts per-signature protected and unprotected headers in general
+form. `encrypt-json` accepts shared protected and unprotected headers; general JWE
+places key-management data on each recipient.
 
 ### JWTs (`jose.jwt`)
 
@@ -189,6 +216,31 @@ deliberately not offered.
 (jws/verify-with-jwks src compact)
 (jwt/verify-with-jwks src token {:iss "https://accounts.google.com"})
 ```
+
+### Key rotation and public JWKS (`jose.keyring`)
+
+```clojure
+(require '[jose.keyring :as keyring])
+
+(def ring
+  (keyring/key-ring [signing-key encryption-key]
+                    {:active-signing-kid "sig-1"
+                     :active-encryption-kid "enc-1"}))
+
+(def token (keyring/sign ring "payload"))
+(keyring/verify ring token {:algs #{:rs256}})
+
+(def rotated (keyring/rotate ring :signing next-signing-key))
+(def pruned (keyring/prune rotated {:retention-seconds 86400}))
+
+(keyring/public-jwks rotated)       ; Nimbus JWKSet
+(keyring/public-jwks-json rotated)  ; publication-ready JWKS JSON
+```
+
+The immutable key ring keeps active signing and encryption keys while retained
+keys continue to verify or decrypt older messages. Published JWKS contain only
+public key material: private parameters are stripped and symmetric keys are
+omitted.
 
 ## Errors
 

@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-07-16
+### Added
+- Added `jose.keyring` for rotating active signing and encryption keys, retaining and pruning retired keys, and publishing public-only JWKS.
+- Added PBES2-HS256/384/512+A128/192/256KW, ECDH-1PU and ECDH-1PU+A128/192/256KW, and XC20P JWE support.
+- Added flattened and general JSON serialization for JWS and JWE, including multiple signatures and recipients.
+
 ## [0.3.0] - 2026-07-16
 ### Changed
 - **BREAKING**: verify/unsign now require an expected algorithm (`:algs`) and reject unexpected algorithms by default (RFC 8725); pass `{:algs #{...}}`, or `{:algs :any}` to opt out. `alg:none` is always rejected.
