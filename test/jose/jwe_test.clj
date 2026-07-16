@@ -144,6 +144,50 @@
              (jwe/header compact)))
       (is (= "hello" (:payload (jwe/decrypt key compact)))))))
 
+(deftest pbes2-round-trips
+  (doseq [alg [:pbes2-hs256+a128kw
+               :pbes2-hs384+a192kw
+               :pbes2-hs512+a256kw]]
+    (testing alg
+      (let [compact (jwe/encrypt "correct horse battery staple"
+                                 "password protected"
+                                 {:alg alg
+                                  :enc :a256gcm
+                                  :salt-length 16
+                                  :iteration-count 1000})]
+        (is (= "password protected"
+               (:payload (jwe/decrypt "correct horse battery staple" compact))))))))
+
+(deftest ecdh-1pu-round-trips
+  (let [sender (jwk/generate :ec {:curve :p-256 :kid "sender"})
+        recipient (jwk/generate :ec {:curve :p-256 :kid "recipient"})
+        encrypt-keys {:sender sender :recipient (jwk/public-jwk recipient)}
+        decrypt-keys {:sender (jwk/public-jwk sender) :recipient recipient}]
+    (doseq [alg [:ecdh-1pu
+                 :ecdh-1pu+a128kw
+                 :ecdh-1pu+a192kw
+                 :ecdh-1pu+a256kw]]
+      (testing alg
+        (let [compact (jwe/encrypt encrypt-keys "authenticated" {:alg alg :enc :a256cbc-hs512})]
+          (is (= "authenticated" (:payload (jwe/decrypt decrypt-keys compact))))))))
+  (testing "X25519"
+    (let [sender (jwk/generate :okp {:curve :x25519 :kid "sender-x"})
+          recipient (jwk/generate :okp {:curve :x25519 :kid "recipient-x"})
+          compact (jwe/encrypt {:sender sender :recipient (jwk/public-jwk recipient)}
+                               "authenticated x25519"
+                               {:alg :ecdh-1pu+a256kw :enc :a256cbc-hs512})]
+      (is (= "authenticated x25519"
+             (:payload (jwe/decrypt {:sender (jwk/public-jwk sender)
+                                     :recipient recipient}
+                                    compact)))))))
+
+(deftest xc20p-round-trip
+  (let [key (jwk/generate :rsa {:kid "xc20p"})
+        compact (jwe/encrypt key "extended nonce" {:alg :rsa-oaep-256 :enc :xc20p})
+        result (jwe/decrypt key compact)]
+    (is (= "extended nonce" (:payload result)))
+    (is (= :xc20p (get-in result [:header :enc])))))
+
 (deftest binary-payloads-return-bytes
   (let [key (jwk/generate :oct {:size 256})
         bytes (byte-array [0 1 2 -1])
