@@ -4,8 +4,10 @@
   (:import (com.nimbusds.jose EncryptionMethod JOSEException JOSEObjectType JWEAlgorithm JWEDecrypter JWEEncrypter
                              JWEHeader JWEHeader$Builder JWEObject KeyLengthException Payload)
            (com.nimbusds.jose.crypto AESDecrypter AESEncrypter DirectDecrypter DirectEncrypter
-                                      ECDHDecrypter ECDHEncrypter RSADecrypter RSAEncrypter
-                                      X25519Decrypter X25519Encrypter)
+                                      ECDH1PUDecrypter ECDH1PUEncrypter ECDH1PUX25519Decrypter
+                                      ECDH1PUX25519Encrypter ECDHDecrypter ECDHEncrypter
+                                      PasswordBasedDecrypter PasswordBasedEncrypter RSADecrypter
+                                      RSAEncrypter X25519Decrypter X25519Encrypter)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
            (java.nio.charset StandardCharsets)
            (java.text ParseException)
@@ -13,7 +15,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:private encrypt-options #{:alg :enc :kid :headers})
+(def ^:private encrypt-options #{:alg :enc :kid :headers :salt-length :iteration-count})
 
 (def ^:private alg-names
   {:rsa-oaep-256 "RSA-OAEP-256"
@@ -23,6 +25,13 @@
    :ecdh-es+a128kw "ECDH-ES+A128KW"
    :ecdh-es+a192kw "ECDH-ES+A192KW"
    :ecdh-es+a256kw "ECDH-ES+A256KW"
+   :ecdh-1pu "ECDH-1PU"
+   :ecdh-1pu+a128kw "ECDH-1PU+A128KW"
+   :ecdh-1pu+a192kw "ECDH-1PU+A192KW"
+   :ecdh-1pu+a256kw "ECDH-1PU+A256KW"
+   :pbes2-hs256+a128kw "PBES2-HS256+A128KW"
+   :pbes2-hs384+a192kw "PBES2-HS384+A192KW"
+   :pbes2-hs512+a256kw "PBES2-HS512+A256KW"
    :a128kw "A128KW"
    :a192kw "A192KW"
    :a256kw "A256KW"
@@ -37,7 +46,8 @@
    :a256cbc-hs512 "A256CBC-HS512"
    :a128gcm "A128GCM"
    :a192gcm "A192GCM"
-   :a256gcm "A256GCM"})
+   :a256gcm "A256GCM"
+   :xc20p "XC20P"})
 
 (def ^:private name-algs
   (into {} (map (fn [[k v]] [v k]) alg-names)))
@@ -170,19 +180,90 @@
                                    (invalid-option! :alg)))
       :else (invalid-option! :alg))))
 
-(defn- decrypter
-  ^JWEDecrypter [^JWK key ^JWEHeader header]
-  (let [key-type (.getKeyType key)
-        alg (.getAlgorithm header)]
+(def ^:private pbes2-algs
+  #{JWEAlgorithm/PBES2_HS256_A128KW
+    JWEAlgorithm/PBES2_HS384_A192KW
+    JWEAlgorithm/PBES2_HS512_A256KW})
+
+(def ^:private ecdh-1pu-algs
+  #{JWEAlgorithm/ECDH_1PU
+    JWEAlgorithm/ECDH_1PU_A128KW
+    JWEAlgorithm/ECDH_1PU_A192KW
+    JWEAlgorithm/ECDH_1PU_A256KW})
+
+(defn- password?
+  [key]
+  (or (string? key) (bytes? key)))
+
+(defn- ecdh-1pu-keys?
+  [key]
+  (and (map? key) (contains? key :sender) (contains? key :recipient)))
+
+(defn- password-encrypter
+  ^PasswordBasedEncrypter [password opts]
+  (let [salt-length (int (:salt-length opts 16))
+        iteration-count (int (:iteration-count opts 10000))]
+    (if (string? password)
+      (PasswordBasedEncrypter. ^String password salt-length iteration-count)
+      (PasswordBasedEncrypter. ^bytes password salt-length iteration-count))))
+
+(defn- password-decrypter
+  ^PasswordBasedDecrypter [password]
+  (if (string? password)
+    (PasswordBasedDecrypter. ^String password)
+    (PasswordBasedDecrypter. ^bytes password)))
+
+(defn- ecdh-1pu-encrypter
+  ^JWEEncrypter [{:keys [sender recipient]}]
+  (let [^JWK sender (jwk/parse sender)
+        ^JWK recipient (jwk/parse recipient)]
     (cond
-      (= KeyType/RSA key-type) (RSADecrypter. ^RSAKey (.toRSAKey key))
-      (= KeyType/EC key-type) (ECDHDecrypter. ^ECKey (.toECKey key))
-      (= KeyType/OKP key-type) (let [okp (.toOctetKeyPair key)]
+      (and (= KeyType/EC (.getKeyType sender))
+           (= KeyType/EC (.getKeyType recipient)))
+      (let [sender (.toECKey sender)
+            recipient (.toECKey (public-key recipient))]
+        (ECDH1PUEncrypter. (.toECPrivateKey sender) (.toECPublicKey recipient)))
+
+      (and (= KeyType/OKP (.getKeyType sender))
+           (= KeyType/OKP (.getKeyType recipient)))
+      (ECDH1PUX25519Encrypter. (.toOctetKeyPair sender)
+                               (.toOctetKeyPair (public-key recipient)))
+
+      :else (invalid-option! :key))))
+
+(defn- ecdh-1pu-decrypter
+  ^JWEDecrypter [{:keys [sender recipient]}]
+  (let [^JWK sender (jwk/parse sender)
+        ^JWK recipient (jwk/parse recipient)]
+    (cond
+      (and (= KeyType/EC (.getKeyType sender))
+           (= KeyType/EC (.getKeyType recipient)))
+      (let [sender (.toECKey (public-key sender))
+            recipient (.toECKey recipient)]
+        (ECDH1PUDecrypter. (.toECPrivateKey recipient) (.toECPublicKey sender)))
+
+      (and (= KeyType/OKP (.getKeyType sender))
+           (= KeyType/OKP (.getKeyType recipient)))
+      (ECDH1PUX25519Decrypter. (.toOctetKeyPair recipient)
+                               (.toOctetKeyPair (public-key sender)))
+
+      :else (invalid-option! :key))))
+
+(defn- decrypter
+  ^JWEDecrypter [key ^JWEHeader header]
+  (let [alg (.getAlgorithm header)
+        key-type (when (instance? JWK key) (.getKeyType ^JWK key))]
+    (cond
+      (contains? pbes2-algs alg) (password-decrypter key)
+      (contains? ecdh-1pu-algs alg) (ecdh-1pu-decrypter key)
+      (= KeyType/RSA key-type) (RSADecrypter. ^RSAKey (.toRSAKey ^JWK key))
+      (= KeyType/EC key-type) (ECDHDecrypter. ^ECKey (.toECKey ^JWK key))
+      (= KeyType/OKP key-type) (let [okp (.toOctetKeyPair ^JWK key)]
                                  (if (= Curve/X25519 (.getCurve okp))
                                    (X25519Decrypter. ^OctetKeyPair okp)
                                    (invalid-option! :alg)))
-      (= JWEAlgorithm/DIR alg) (DirectDecrypter. ^OctetSequenceKey (.toOctetSequenceKey key))
-      (= KeyType/OCT key-type) (AESDecrypter. ^OctetSequenceKey (.toOctetSequenceKey key))
+      (= JWEAlgorithm/DIR alg) (DirectDecrypter. ^OctetSequenceKey (.toOctetSequenceKey ^JWK key))
+      (= KeyType/OCT key-type) (AESDecrypter. ^OctetSequenceKey (.toOctetSequenceKey ^JWK key))
       :else (invalid-option! :alg))))
 
 (defn- jwe-object
@@ -210,10 +291,12 @@
   (= JWEAlgorithm/DIR alg))
 
 (defn- build-encrypter
-  ^JWEEncrypter [^JWK key ^JWEAlgorithm alg]
-  (if (direct-encrypter? alg)
-    (DirectEncrypter. ^OctetSequenceKey (.toOctetSequenceKey key))
-    (encrypter key)))
+  ^JWEEncrypter [key ^JWEAlgorithm alg opts]
+  (cond
+    (contains? pbes2-algs alg) (password-encrypter key opts)
+    (contains? ecdh-1pu-algs alg) (ecdh-1pu-encrypter key)
+    (direct-encrypter? alg) (DirectEncrypter. ^OctetSequenceKey (.toOctetSequenceKey ^JWK key))
+    :else (encrypter key)))
 
 (defn- key-length-exception?
   [^JOSEException e]
@@ -231,20 +314,30 @@
   (^String [key payload-value opts]
    (validate-options! opts)
    (try
-     (let [^JWK key (jwk/parse key)
-           alg (algorithm (:alg opts (default-alg key)))
+     (let [special-key? (or (password? key) (ecdh-1pu-keys? key))
+           key (if special-key? key (jwk/parse key))
+           alg (algorithm (if (contains? opts :alg)
+                            (:alg opts)
+                            (if special-key?
+                              (invalid-option! :alg)
+                              (default-alg key))))
            enc (encryption-method (:enc opts :a256gcm))
            ^JWEHeader$Builder builder (JWEHeader$Builder. alg enc)
-           kid (if (contains? opts :kid) (:kid opts) (.getKeyID key))]
+           kid (if (contains? opts :kid)
+                 (:kid opts)
+                 (cond
+                   (ecdh-1pu-keys? key) (jwk/key-id (:recipient key))
+                   (instance? JWK key) (.getKeyID ^JWK key)
+                   :else nil))]
        (when (and (direct-alg? alg)
-                  (not= KeyType/OCT (.getKeyType key)))
+                  (or special-key? (not= KeyType/OCT (.getKeyType ^JWK key))))
          (invalid-option! :alg))
        (doseq [[k v] (:headers opts)]
          (apply-header! builder k v))
        (when kid
          (.keyID builder kid))
        (let [jwe (JWEObject. (.build builder) (->payload payload-value))]
-         (.encrypt jwe (build-encrypter key alg))
+         (.encrypt jwe (build-encrypter key alg opts))
          (.serialize jwe)))
      (catch KeyLengthException e
        (throw (jose-ex :key-length "Invalid JWE key length" e {})))
@@ -259,7 +352,11 @@
   (try
     (let [jwe (jwe-object compact)
           ^JWEHeader header (.getHeader jwe)]
-      (.decrypt jwe (decrypter (jwk/parse key) header))
+      (.decrypt jwe (decrypter (if (or (contains? pbes2-algs (.getAlgorithm header))
+                                       (contains? ecdh-1pu-algs (.getAlgorithm header)))
+                                 key
+                                 (jwk/parse key))
+                               header))
       (let [^Payload payload (.getPayload jwe)
             bytes (.toBytes payload)]
         {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
