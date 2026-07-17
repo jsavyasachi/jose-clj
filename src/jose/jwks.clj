@@ -7,13 +7,22 @@
            (com.nimbusds.jose.jwk.source ImmutableJWKSet JWKSource JWKSourceBuilder)
            (com.nimbusds.jose.proc SimpleSecurityContext)
            (com.nimbusds.jose.util Base64URL DefaultResourceRetriever)
+           (com.nimbusds.jose.util.events EventListener)
+           (com.nimbusds.jose.util.health HealthReportListener)
            (java.net MalformedURLException URI URISyntaxException URL)
            (java.util Set)))
 
 (set! *warn-on-reflection* true)
 
 (def ^:private remote-options
-  #{:cache-ttl-ms :cache-refresh-ms :connect-timeout-ms :read-timeout-ms :rate-limit-ms})
+  #{:cache? :cache-forever? :cache-ttl-ms :cache-refresh-ms
+    :connect-timeout-ms :read-timeout-ms
+    :refresh-ahead? :refresh-ahead-ms :refresh-ahead-scheduled?
+    :rate-limit? :rate-limit-ms :retry? :failover
+    :outage-tolerant? :outage-ttl-ms :outage-forever?
+    :cache-event-listener :refresh-ahead-event-listener
+    :rate-limit-event-listener :retry-event-listener
+    :outage-event-listener :health-report-listener})
 
 (def ^:private get-options
   #{:kid :kty :use :alg :key-ops :curves :key-size :key-sizes
@@ -60,6 +69,33 @@
   (doseq [option (keys opts)]
     (when-not (contains? allowed option)
       (invalid-option! option))))
+
+(defn- source
+  ^JWKSource [source-value]
+  (cond
+    (instance? Source source-value) (:jwk-source source-value)
+    (instance? JWKSource source-value) source-value
+    :else (invalid-option! :source)))
+
+(defn- event-listener
+  ^EventListener [value option]
+  (cond
+    (nil? value) nil
+    (instance? EventListener value) value
+    (ifn? value) (reify EventListener
+                   (notify [_ event]
+                     (value event)))
+    :else (invalid-option! option)))
+
+(defn- health-report-listener
+  ^HealthReportListener [value]
+  (cond
+    (nil? value) nil
+    (instance? HealthReportListener value) value
+    (ifn? value) (reify HealthReportListener
+                   (notify [_ report]
+                     (value report)))
+    :else (invalid-option! :health-report-listener)))
 
 (defn- url
   ^URL [s]
@@ -182,22 +218,72 @@
 
 (defn- configure-builder!
   ^JWKSourceBuilder [^JWKSourceBuilder builder opts]
-  (when (or (contains? opts :cache-ttl-ms)
-            (contains? opts :cache-refresh-ms))
-    (.cache builder
-            (long (:cache-ttl-ms opts 300000))
-            (long (:cache-refresh-ms opts 15000))))
-  (when-let [rate-limit-ms (:rate-limit-ms opts)]
-    (.rateLimited builder (long rate-limit-ms)))
+  (let [cache-listener (event-listener (:cache-event-listener opts)
+                                       :cache-event-listener)
+        refresh-listener (event-listener (:refresh-ahead-event-listener opts)
+                                         :refresh-ahead-event-listener)
+        rate-listener (event-listener (:rate-limit-event-listener opts)
+                                      :rate-limit-event-listener)
+        retry-listener (event-listener (:retry-event-listener opts)
+                                       :retry-event-listener)
+        outage-listener (event-listener (:outage-event-listener opts)
+                                        :outage-event-listener)]
+    (cond
+      (:cache-forever? opts) (.cacheForever builder)
+      (or (contains? opts :cache-ttl-ms)
+          (contains? opts :cache-refresh-ms)
+          cache-listener)
+      (let [ttl (long (:cache-ttl-ms opts 300000))
+            refresh (long (:cache-refresh-ms opts 15000))]
+        (if cache-listener
+          (.cache builder ttl refresh cache-listener)
+          (.cache builder ttl refresh)))
+      (contains? opts :cache?) (.cache builder (boolean (:cache? opts))))
+    (cond
+      (contains? opts :refresh-ahead-ms)
+      (let [ahead (long (:refresh-ahead-ms opts))
+            scheduled? (boolean (:refresh-ahead-scheduled? opts false))]
+        (if refresh-listener
+          (.refreshAheadCache builder ahead scheduled? refresh-listener)
+          (.refreshAheadCache builder ahead scheduled?)))
+      (contains? opts :refresh-ahead?)
+      (.refreshAheadCache builder (boolean (:refresh-ahead? opts)))
+      (false? (:cache? opts))
+      (.refreshAheadCache builder false))
+    (cond
+      (contains? opts :rate-limit-ms)
+      (let [interval (long (:rate-limit-ms opts))]
+        (if rate-listener
+          (.rateLimited builder interval rate-listener)
+          (.rateLimited builder interval)))
+      (contains? opts :rate-limit?)
+      (.rateLimited builder (boolean (:rate-limit? opts)))
+      (false? (:cache? opts))
+      (.rateLimited builder false))
+    (cond
+      retry-listener (.retrying builder retry-listener)
+      (contains? opts :retry?) (.retrying builder (boolean (:retry? opts))))
+    (cond
+      (:outage-forever? opts) (.outageTolerantForever builder)
+      (contains? opts :outage-ttl-ms)
+      (let [ttl (long (:outage-ttl-ms opts))]
+        (if outage-listener
+          (.outageTolerant builder ttl outage-listener)
+          (.outageTolerant builder ttl)))
+      (contains? opts :outage-tolerant?)
+      (.outageTolerant builder (boolean (:outage-tolerant? opts))))
+    (when-let [listener (health-report-listener (:health-report-listener opts))]
+      (.healthReporting builder listener))
+    (when-let [failover (:failover opts)]
+      (.failover builder (source failover))))
   builder)
 
 (defn remote-source
   "Returns an opaque remote JWKS source.
 
-  Without options, Nimbus defaults are used; its default URL builder already
-  caches keys. Pass timeout, cache, or rate-limit options to override those
-  builder settings. Force refresh is omitted because Nimbus exposes no public
-  force-refresh method on the verified caching source API."
+  Without options, Nimbus defaults are used. Options configure caching,
+  refresh-ahead, retry, failover, outage tolerance, rate limiting, and event
+  or health listeners."
   (^Source [jwks-url]
    (remote-source jwks-url {}))
   (^Source [jwks-url opts]
@@ -210,13 +296,6 @@
   (->Source (ImmutableJWKSet. (if (sequential? jwk-set-or-vector)
                                 (jwk/jwk-set jwk-set-or-vector)
                                 (jwk/parse-set jwk-set-or-vector)))))
-
-(defn- source
-  ^JWKSource [source-value]
-  (cond
-    (instance? Source source-value) (:jwk-source source-value)
-    (instance? JWKSource source-value) source-value
-    :else (invalid-option! :source)))
 
 (defn get-keys
   "Returns Nimbus JWKs matching the supplied JWK matcher options."

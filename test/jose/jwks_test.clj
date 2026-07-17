@@ -2,7 +2,10 @@
   (:require [clojure.test :refer [deftest is testing]]
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
-  (:import (clojure.lang ExceptionInfo)))
+  (:import (clojure.lang ExceptionInfo)
+           (com.sun.net.httpserver HttpHandler HttpServer)
+           (java.net InetSocketAddress)
+           (java.nio.charset StandardCharsets)))
 
 (defn thrown-data
   [f]
@@ -11,6 +14,23 @@
     nil
     (catch ExceptionInfo e
       (ex-data e))))
+
+(defn test-server
+  [respond]
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/jwks"
+                    (reify HttpHandler
+                      (handle [_ exchange]
+                        (let [[status body] (respond)
+                              bytes (.getBytes (str body) StandardCharsets/UTF_8)]
+                          (.sendResponseHeaders exchange status (count bytes))
+                          (with-open [output (.getResponseBody exchange)]
+                            (.write output bytes))))))
+    (.start server)
+    {:server server
+     :url (str "http://127.0.0.1:"
+               (.getPort (.getAddress server))
+               "/jwks")}))
 
 (deftest local-sources-select-keys
   (let [rsa-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
@@ -70,6 +90,75 @@
 (deftest remote-source-rejects-invalid-url
   (is (= :invalid-url
          (:jose/error (thrown-data #(jwks/remote-source "not a url"))))))
+
+(deftest remote-source-retries-and-reports-health-events
+  (let [requests (atom 0)
+        health-reports (atom [])
+        cache-events (atom [])
+        json (jwk/set->json (jwk/jwk-set [(jwk/generate :rsa {:kid "remote"})]))
+        {:keys [server url]} (test-server #(if (= 1 (swap! requests inc))
+                                            [500 "unavailable"]
+                                            [200 json]))]
+    (try
+      (let [source (jwks/remote-source url {:retry? true
+                                            :cache-event-listener
+                                            #(swap! cache-events conj %)
+                                            :health-report-listener
+                                            #(swap! health-reports conj %)})]
+        (is (= ["remote"] (mapv jwk/key-id (jwks/get-keys source {}))))
+        (is (= 2 @requests))
+        (is (seq @cache-events))
+        (is (seq @health-reports)))
+      (finally
+        (.stop server 0)))))
+
+(deftest remote-source-fails-over-to-another-source
+  (let [fallback (jwks/local-source [(jwk/generate :rsa {:kid "fallback"})])
+        {:keys [server url]} (test-server (constantly [500 "unavailable"]))]
+    (try
+      (let [source (jwks/remote-source url {:retry? false :failover fallback})]
+        (is (= ["fallback"] (mapv jwk/key-id (jwks/get-keys source {})))))
+      (finally
+        (.stop server 0)))))
+
+(deftest remote-source-serves-stale-keys-during-outage
+  (let [available? (atom true)
+        json (jwk/set->json (jwk/jwk-set [(jwk/generate :rsa {:kid "stale"})]))
+        {:keys [server url]} (test-server #(if @available?
+                                            [200 json]
+                                            [500 "unavailable"]))]
+    (try
+      (let [source (jwks/remote-source url {:cache-ttl-ms 20
+                                            :cache-refresh-ms 10
+                                            :refresh-ahead? false
+                                            :rate-limit? false
+                                            :retry? false
+                                            :outage-ttl-ms 1000})]
+        (is (= ["stale"] (mapv jwk/key-id (jwks/get-keys source {}))))
+        (reset! available? false)
+        (Thread/sleep 30)
+        (is (= ["stale"] (mapv jwk/key-id (jwks/get-keys source {})))))
+      (finally
+        (.stop server 0)))))
+
+(deftest remote-source-accepts-cache-and-resilience-modes
+  (is (jwks/remote-source "https://example.test/jwks"
+                          {:cache? false
+                           :retry? false
+                           :outage-tolerant? false}))
+  (is (jwks/remote-source "https://example.test/jwks"
+                          {:cache-forever? true
+                           :rate-limit-ms 1000
+                           :retry? true}))
+  (is (jwks/remote-source "https://example.test/jwks"
+                          {:outage-forever? true}))
+  (is (jwks/remote-source "https://example.test/jwks"
+                          {:cache-ttl-ms 60000
+                           :cache-refresh-ms 1000
+                           :refresh-ahead-ms 10000
+                           :refresh-ahead-scheduled? false
+                           :rate-limit-ms 1000
+                           :outage-ttl-ms 120000})))
 
 (deftest ^:integration google-jwks-has-rsa-keys
   (let [source (jwks/remote-source "https://www.googleapis.com/oauth2/v3/certs")]
