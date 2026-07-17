@@ -6,6 +6,7 @@
             [jose.jwks :as jwks]
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
+           (com.nimbusds.jwt JWTClaimsSet$Builder PlainJWT)
            (java.time Instant)))
 
 (defn thrown
@@ -50,6 +51,28 @@
             :exp (Instant/parse "2035-01-01T00:00:00Z")
             "custom" true}
            (jwt/claims compact)))))
+
+(deftest generic-jwt-parsing-is-inspection-only
+  (let [sign-key (jwk/generate :oct {:size 256 :kid "sig"})
+        encrypt-key (jwk/generate :rsa {:kid "enc"})
+        signed (jwt/sign sign-key {:sub "subject"} {:headers {:typ "JWT"}})
+        encrypted (jwt/encrypt encrypt-key {:sub "subject"}
+                               {:headers {:typ "JWT"}})
+        plain (.serialize (PlainJWT. (.build (doto (JWTClaimsSet$Builder.)
+                                               (.subject "subject")))))]
+    (is (= {:type :signed
+            :header {:alg :hs256 :kid "sig" :typ "JWT"}}
+           (jwt/parse signed)))
+    (is (= {:type :encrypted
+            :header {:alg :rsa-oaep-256 :enc :a256gcm :kid "enc" :typ "JWT"}}
+           (jwt/parse encrypted)))
+    (is (= {:type :plain :header {:alg :none}}
+           (jwt/parse plain)))
+    (is (= :signed (jwt/parse-type signed)))
+    (is (= :encrypted (jwt/parse-type encrypted)))
+    (is (= :plain (jwt/parse-type plain)))
+    (is (= :parse-failure
+           (:jose/error (thrown-data #(jwt/parse "not-a-jwt")))))))
 
 (deftest auto-claims
   (let [key (jwk/generate :oct {:size 256})

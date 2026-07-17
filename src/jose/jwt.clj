@@ -3,15 +3,15 @@
             [jose.jwe :as jwe]
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
-  (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder JWSProvider)
+  (:import (com.nimbusds.jose Header JOSEException JOSEObjectType JWEHeader JWSAlgorithm JWSHeader JWSHeader$Builder JWSProvider)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
-           (com.nimbusds.jwt JWTClaimsSet JWTClaimsSet$Builder SignedJWT)
+           (com.nimbusds.jwt EncryptedJWT JWT JWTClaimsSet JWTClaimsSet$Builder JWTParser PlainJWT SignedJWT)
            (java.security Provider Security)
            (java.text ParseException)
            (java.time Instant)
-           (java.util ArrayList Date List)))
+           (java.util ArrayList Date List Map)))
 
 (set! *warn-on-reflection* true)
 
@@ -88,6 +88,50 @@
                            x))
     (sequential? x) (mapv stringify-json-value x)
     :else x))
+
+(defn- keywordize-json-value
+  [x]
+  (cond
+    (instance? Map x) (into {} (map (fn [[k v]]
+                                      [(keyword k) (keywordize-json-value v)])
+                                    x))
+    (instance? List x) (mapv keywordize-json-value x)
+    :else x))
+
+(defn- header-map
+  [^Header header]
+  (cond-> (keywordize-json-value (.toJSONObject header))
+    (.getAlgorithm header) (update :alg #(keyword (str/lower-case (str %))))
+    (instance? JWEHeader header) (update :enc #(keyword (str/lower-case (str %))))))
+
+(defn- parsed-jwt
+  ^JWT [compact]
+  (try
+    (JWTParser/parse ^String compact)
+    (catch ParseException e
+      (throw (jose-ex :parse-failure "Failed to parse JWT" e {})))
+    (catch RuntimeException e
+      (throw (jose-ex :parse-failure "Failed to parse JWT" e {})))))
+
+(defn parse
+  "Inspects a compact JWT and returns its type and unverified header.
+
+  This only parses attacker-controlled data. It does not verify a signature,
+  decrypt content, validate claims, or establish trust."
+  [compact]
+  (let [jwt (parsed-jwt compact)]
+    {:type (cond
+             (instance? SignedJWT jwt) :signed
+             (instance? EncryptedJWT jwt) :encrypted
+             (instance? PlainJWT jwt) :plain)
+     :header (header-map (.getHeader jwt))}))
+
+(defn parse-type
+  "Returns the unverified compact JWT type: :plain, :signed, or :encrypted.
+
+  This is inspection-only and does not establish trust."
+  [compact]
+  (:type (parse compact)))
 
 (defn- bouncy-castle-provider
   ^Provider []
