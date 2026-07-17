@@ -33,6 +33,40 @@
       (is (= "a" (jwk/key-id (jwks/find-key source "a"))))
       (is (nil? (jwks/find-key source "missing"))))))
 
+(deftest local-sources-support-full-jwk-matching
+  (let [rsa-private (jwk/generate :rsa {:kid "rsa-private"
+                                        :use :sig
+                                        :key-ops [:sign :verify]
+                                        :x5t "AQID"
+                                        :x5t#S256 "BAUG"})
+        rsa-public (jwk/public-jwk (jwk/generate :rsa {:kid "rsa-public"}))
+        ec-private (jwk/generate :ec {:kid "ec-private" :curve :p-256})
+        source (jwks/local-source [rsa-private rsa-public ec-private])]
+    (testing "filters by key operations"
+      (is (= ["rsa-private"]
+             (mapv jwk/key-id
+                   (jwks/get-keys source {:key-ops [:sign :verify]})))))
+    (testing "filters by curves"
+      (is (= ["ec-private"]
+             (mapv jwk/key-id (jwks/get-keys source {:curves [:p-256]})))))
+    (testing "filters by exact and bounded key sizes"
+      (is (= ["ec-private"]
+             (mapv jwk/key-id (jwks/get-keys source {:key-size 256 :kty :ec}))))
+      (is (= #{"rsa-private" "rsa-public"}
+             (set (map jwk/key-id
+                       (jwks/get-keys source {:min-key-size 2048
+                                              :max-key-size 2048}))))))
+    (testing "filters public and private keys"
+      (is (= ["rsa-public"]
+             (mapv jwk/key-id (jwks/get-keys source {:private? false}))))
+      (is (= #{"rsa-private" "ec-private"}
+             (set (map jwk/key-id (jwks/get-keys source {:private? true}))))))
+    (testing "filters X.509 thumbprints"
+      (is (= ["rsa-private"]
+             (mapv jwk/key-id (jwks/get-keys source {:x5t "AQID"}))))
+      (is (= ["rsa-private"]
+             (mapv jwk/key-id (jwks/get-keys source {:x5t#S256 "BAUG"})))))))
+
 (deftest remote-source-rejects-invalid-url
   (is (= :invalid-url
          (:jose/error (thrown-data #(jwks/remote-source "not a url"))))))

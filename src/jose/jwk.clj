@@ -1,7 +1,7 @@
 (ns jose.jwk
   (:require [clojure.string :as str])
   (:import (com.nimbusds.jose Algorithm JOSEException)
-           (com.nimbusds.jose.jwk Curve ECKey$Builder JWK JWKSet
+           (com.nimbusds.jose.jwk Curve ECKey$Builder JWK JWKMatcher JWKSet
                                   KeyOperation KeyType KeyUse
                                   OctetKeyPair$Builder OctetSequenceKey$Builder
                                   RSAKey$Builder)
@@ -10,6 +10,7 @@
                                        OctetSequenceKeyGenerator
                                        RSAKeyGenerator)
            (com.nimbusds.jose.util Base64 Base64URL)
+           (java.io File IOException InputStream)
            (java.net URI)
            (java.security KeyStore KeyStoreException)
            (java.security.cert X509Certificate)
@@ -396,8 +397,11 @@
                (configure-x509 (.generate generator) opts)))))))
 
 (defn jwk-set
-  ^JWKSet [jwks]
-  (JWKSet. (java-list (map parse jwks))))
+  (^JWKSet [jwks]
+   (jwk-set jwks {}))
+  (^JWKSet [jwks members]
+   (JWKSet. (java-list (map parse jwks))
+            (stringify-json-value members))))
 
 (defn parse-set
   "Parses a JWKS JSON string, Clojure map, or returns a Nimbus JWKSet unchanged."
@@ -410,6 +414,19 @@
        (map? s-or-map) (JWKSet/parse ^Map (stringify-json-value s-or-map))
        :else (throw (IllegalArgumentException. "Expected JWKSet, JSON string, or map"))))))
 
+(defn load-set
+  "Loads a JWK set from a file, input stream, JSON string, or Nimbus JWKSet."
+  ^JWKSet [source]
+  (try
+    (cond
+      (instance? File source) (JWKSet/load ^File source)
+      (instance? InputStream source) (JWKSet/load ^InputStream source)
+      :else (parse-set source))
+    (catch IOException e
+      (throw (jose-ex :parse-failure "Failed to load JWK set" e {})))
+    (catch ParseException e
+      (throw (jose-ex :parse-failure "Failed to load JWK set" e {})))))
+
 (defn set->maps
   [jwks]
   (let [^JWKSet jwks (parse-set jwks)]
@@ -420,10 +437,33 @@
   (let [^JWKSet jwks (parse-set jwks)]
     (.getKeyByKeyId jwks kid)))
 
-(defn- public-jwk-set
+(defn set-contains?
+  "Returns true when the set contains a JWK with the same thumbprint."
+  [jwks candidate]
+  (wrap-jose
+   :thumbprint-failure
+   "Failed to compare JWK thumbprints"
+   (fn []
+     (let [^JWKSet jwks (parse-set jwks)]
+       (.containsJWK jwks (parse candidate))))))
+
+(defn filter-set
+  "Returns the JWKs matching a Nimbus JWKMatcher."
+  ^JWKSet [jwks matcher]
+  (let [^JWKSet jwks (parse-set jwks)]
+    (.filter jwks ^JWKMatcher matcher)))
+
+(defn set-members
+  "Returns top-level JWK set members other than keys."
+  [jwks]
+  (let [^JWKSet jwks (parse-set jwks)]
+    (keywordize-json-value (.getAdditionalMembers jwks))))
+
+(defn public-jwk-set
+  "Returns a public JWK set with all private and symmetric material removed."
   ^JWKSet [jwks]
   (let [^JWKSet jwks (parse-set jwks)]
-    (jwk-set (keep public-jwk (.getKeys jwks)))))
+    (.toPublicJWKSet jwks)))
 
 (defn set->json
   (^String [jwks]
