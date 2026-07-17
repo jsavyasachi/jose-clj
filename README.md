@@ -32,13 +32,13 @@ Nimbus and stay correct as it is updated.
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.4.0"}
+net.clojars.savya/jose-clj {:mvn/version "0.5.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/jose-clj "0.4.0"]
+[net.clojars.savya/jose-clj "0.5.0"]
 ```
 
 Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. Because jose-clj is a thin wrapper,
