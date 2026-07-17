@@ -512,7 +512,7 @@
                (keyword? alg) (if (= :dir alg) "dir" (str/upper-case (name alg)))
                (string? alg) alg
                :else (invalid-option! :jwe-algs))]
-    (when (#{"RSA1_5" "RSA1-5"} name)
+    (when (str/starts-with? (str/upper-case name) "RSA1")
       (invalid-option! :jwe-algs))
     (JWEAlgorithm/parse ^String name)))
 
@@ -523,7 +523,7 @@
                (keyword? enc) (str/upper-case (name enc))
                (string? enc) enc
                :else (invalid-option! :jwe-encs))]
-    (when (#{"A128CBC+HS256" "A256CBC+HS512"} name)
+    (when (str/includes? (str/upper-case name) "CBC+")
       (invalid-option! :jwe-encs))
     (EncryptionMethod/parse ^String name)))
 

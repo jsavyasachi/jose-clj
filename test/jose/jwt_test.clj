@@ -314,4 +314,11 @@
     (is (= :encryption-method-not-allowed
            (:jose/error (thrown-data #(jwt/process source wrong-enc policy)))))
     (is (= :unsecured-jwt
-           (:jose/error (thrown-data #(jwt/process source plain policy)))))))
+           (:jose/error (thrown-data #(jwt/process source plain policy)))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwt/processor source (assoc policy :jws-algs #{:none}))))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwt/processor source (assoc policy :jwe-algs #{"RSA1_5"}))))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwt/processor source
+                                                    (assoc policy :jwe-encs #{"A128CBC+HS256"}))))))))
