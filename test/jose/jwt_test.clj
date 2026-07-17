@@ -7,7 +7,7 @@
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jwt JWTClaimsSet$Builder PlainJWT)
-           (com.nimbusds.jwt.proc JWTClaimsSetVerifier)
+           (com.nimbusds.jwt.proc ConfigurableJWTProcessor JWTClaimsSetVerifier)
            (java.time Instant)))
 
 (defn thrown
@@ -267,3 +267,51 @@
                                                                sign-key
                                                                compact
                                                                {:algs #{:hs256}})))))))
+
+(deftest configurable-jwt-processor-pipeline
+  (let [sign-key (jwk/generate :oct {:size 256 :kid "sig" :use :sig :alg :hs256})
+        encrypt-key (jwk/generate :rsa {:kid "enc" :use :enc :alg "RSA-OAEP-256"})
+        source (jwks/local-source [sign-key encrypt-key])
+        seen-context (atom nil)
+        policy {:jws-algs #{:hs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}
+                :typ "JWT"
+                :aud ["api" "mobile"]
+                :exact {"role" "admin"}
+                :verifier (fn [_ context]
+                            (reset! seen-context context)
+                            true)}
+        claims {:sub "subject" :aud ["mobile"] :exp 2051222400 "role" "admin"}
+        signed (jwt/sign sign-key claims {:headers {:typ "JWT"}})
+        encrypted (jwt/encrypt encrypt-key claims {:headers {:typ "JWT"}})
+        nested (jwt/sign-then-encrypt sign-key encrypt-key claims
+                                      {:sign-opts {:headers {:typ "JWT"}}
+                                       :encrypt-opts {:headers {:typ "JWT"}}})]
+    (is (instance? ConfigurableJWTProcessor (jwt/processor source policy)))
+    (is (= "subject" (:sub (jwt/process source signed {:request-id "request-1"} policy))))
+    (is (= {:request-id "request-1"} @seen-context))
+    (is (= "subject" (:sub (jwt/process source encrypted policy))))
+    (is (= "subject" (:sub (jwt/process source nested policy))))
+    (is (= "subject" (:sub (jwt/process (:jwk-source source) signed policy))))))
+
+(deftest processor-requires-and-enforces-algorithm-policy
+  (let [key (jwk/generate :oct {:size 512 :kid "sig" :use :sig})
+        encrypt-key (jwk/generate :rsa {:kid "enc" :use :enc})
+        source (jwks/local-source [key encrypt-key])
+        policy {:jws-algs #{:hs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}}
+        substituted (jwt/sign key {:sub "subject" :exp 2051222400} {:alg :hs512})
+        wrong-enc (jwt/encrypt encrypt-key {:sub "subject" :exp 2051222400}
+                               {:enc :a128gcm})
+        plain (.serialize (PlainJWT. (.build (doto (JWTClaimsSet$Builder.)
+                                               (.subject "subject")))))]
+    (is (= :algorithm-unspecified
+           (:jose/error (thrown-data #(jwt/process source substituted {})))))
+    (is (= :algorithm-not-allowed
+           (:jose/error (thrown-data #(jwt/process source substituted policy)))))
+    (is (= :encryption-method-not-allowed
+           (:jose/error (thrown-data #(jwt/process source wrong-enc policy)))))
+    (is (= :unsecured-jwt
+           (:jose/error (thrown-data #(jwt/process source plain policy)))))))
