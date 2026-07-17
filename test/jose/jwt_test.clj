@@ -6,6 +6,8 @@
             [jose.jwks :as jwks]
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
+           (com.nimbusds.jwt JWTClaimsSet$Builder PlainJWT)
+           (com.nimbusds.jwt.proc ConfigurableJWTProcessor JWTClaimsSetVerifier)
            (java.time Instant)))
 
 (defn thrown
@@ -51,6 +53,28 @@
             "custom" true}
            (jwt/claims compact)))))
 
+(deftest generic-jwt-parsing-is-inspection-only
+  (let [sign-key (jwk/generate :oct {:size 256 :kid "sig"})
+        encrypt-key (jwk/generate :rsa {:kid "enc"})
+        signed (jwt/sign sign-key {:sub "subject"} {:headers {:typ "JWT"}})
+        encrypted (jwt/encrypt encrypt-key {:sub "subject"}
+                               {:headers {:typ "JWT"}})
+        plain (.serialize (PlainJWT. (.build (doto (JWTClaimsSet$Builder.)
+                                               (.subject "subject")))))]
+    (is (= {:type :signed
+            :header {:alg :hs256 :kid "sig" :typ "JWT"}}
+           (jwt/parse signed)))
+    (is (= {:type :encrypted
+            :header {:alg :rsa-oaep-256 :enc :a256gcm :kid "enc" :typ "JWT"}}
+           (jwt/parse encrypted)))
+    (is (= {:type :plain :header {:alg :none}}
+           (jwt/parse plain)))
+    (is (= :signed (jwt/parse-type signed)))
+    (is (= :encrypted (jwt/parse-type encrypted)))
+    (is (= :plain (jwt/parse-type plain)))
+    (is (= :parse-failure
+           (:jose/error (thrown-data #(jwt/parse "not-a-jwt")))))))
+
 (deftest auto-claims
   (let [key (jwk/generate :oct {:size 256})
         before (Instant/now)
@@ -81,6 +105,38 @@
     (is (= :missing-claim (:jose/error (thrown-data #(jwt/verify key no-sub {:algs #{:hs256} :required [:sub]})))))
     (is (= :sub (:claim (thrown-data #(jwt/verify key no-sub {:algs #{:hs256} :required [:sub]})))))
     (is (= "subject" (:sub (jwt/verify key skewed {:algs #{:hs256} :clock-skew 60}))))))
+
+(deftest richer-claims-verification
+  (let [claims {:iss "issuer"
+                :aud ["api" "mobile"]
+                :exp 2051222400
+                "role" "admin"}
+        context {:request-id "request-1"}
+        seen (atom nil)]
+    (is (instance? JWTClaimsSetVerifier (jwt/claims-verifier {:aud ["api"]})))
+    (is (= "admin"
+           (get (jwt/verify-claims claims
+                                   context
+                                   {:exact {:iss "issuer" "role" "admin"}
+                                    :aud ["web" "mobile"]
+                                    :required [:iss "role"]
+                                    :prohibited [:jti]
+                                    :verifier (fn [verified-claims verifier-context]
+                                                (reset! seen [verified-claims verifier-context])
+                                                true)})
+                "role")))
+    (is (= context (second @seen)))
+    (is (= :claim-mismatch
+           (:jose/error (thrown-data #(jwt/verify-claims claims {:exact {"role" "user"}})))))
+    (is (= :aud
+           (:claim (thrown-data #(jwt/verify-claims claims {:aud ["web" "service"]})))))
+    (is (= :prohibited-claim
+           (:jose/error (thrown-data #(jwt/verify-claims claims {:prohibited ["role"]})))))
+    (is (= "role"
+           (:claim (thrown-data #(jwt/verify-claims claims {:prohibited ["role"]})))))
+    (is (= :claim-verification-failure
+           (:jose/error (thrown-data #(jwt/verify-claims claims
+                                                        {:verifier (constantly false)})))))))
 
 (deftest verify-with-jwks-selects-key-and-validates-claims
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
@@ -211,3 +267,58 @@
                                                                sign-key
                                                                compact
                                                                {:algs #{:hs256}})))))))
+
+(deftest configurable-jwt-processor-pipeline
+  (let [sign-key (jwk/generate :oct {:size 256 :kid "sig" :use :sig :alg :hs256})
+        encrypt-key (jwk/generate :rsa {:kid "enc" :use :enc :alg "RSA-OAEP-256"})
+        source (jwks/local-source [sign-key encrypt-key])
+        seen-context (atom nil)
+        policy {:jws-algs #{:hs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}
+                :typ "JWT"
+                :aud ["api" "mobile"]
+                :exact {"role" "admin"}
+                :verifier (fn [_ context]
+                            (reset! seen-context context)
+                            true)}
+        claims {:sub "subject" :aud ["mobile"] :exp 2051222400 "role" "admin"}
+        signed (jwt/sign sign-key claims {:headers {:typ "JWT"}})
+        encrypted (jwt/encrypt encrypt-key claims {:headers {:typ "JWT"}})
+        nested (jwt/sign-then-encrypt sign-key encrypt-key claims
+                                      {:sign-opts {:headers {:typ "JWT"}}
+                                       :encrypt-opts {:headers {:typ "JWT"}}})]
+    (is (instance? ConfigurableJWTProcessor (jwt/processor source policy)))
+    (is (= "subject" (:sub (jwt/process source signed {:request-id "request-1"} policy))))
+    (is (= {:request-id "request-1"} @seen-context))
+    (is (= "subject" (:sub (jwt/process source encrypted policy))))
+    (is (= "subject" (:sub (jwt/process source nested policy))))
+    (is (= "subject" (:sub (jwt/process (:jwk-source source) signed policy))))))
+
+(deftest processor-requires-and-enforces-algorithm-policy
+  (let [key (jwk/generate :oct {:size 512 :kid "sig" :use :sig})
+        encrypt-key (jwk/generate :rsa {:kid "enc" :use :enc})
+        source (jwks/local-source [key encrypt-key])
+        policy {:jws-algs #{:hs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}}
+        substituted (jwt/sign key {:sub "subject" :exp 2051222400} {:alg :hs512})
+        wrong-enc (jwt/encrypt encrypt-key {:sub "subject" :exp 2051222400}
+                               {:enc :a128gcm})
+        plain (.serialize (PlainJWT. (.build (doto (JWTClaimsSet$Builder.)
+                                               (.subject "subject")))))]
+    (is (= :algorithm-unspecified
+           (:jose/error (thrown-data #(jwt/process source substituted {})))))
+    (is (= :algorithm-not-allowed
+           (:jose/error (thrown-data #(jwt/process source substituted policy)))))
+    (is (= :encryption-method-not-allowed
+           (:jose/error (thrown-data #(jwt/process source wrong-enc policy)))))
+    (is (= :unsecured-jwt
+           (:jose/error (thrown-data #(jwt/process source plain policy)))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwt/processor source (assoc policy :jws-algs #{:none}))))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwt/processor source (assoc policy :jwe-algs #{"RSA1_5"}))))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwt/processor source
+                                                    (assoc policy :jwe-encs #{"A128CBC+HS256"}))))))))

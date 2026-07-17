@@ -3,11 +3,13 @@
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
   (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder
-                             JWSObject JWSObjectJSON JWSObjectJSON$Signature JWSProvider Payload
-                             UnprotectedHeader UnprotectedHeader$Builder)
+                             JWSObject JWSObjectJSON JWSObjectJSON$Signature JWSProvider JWSSigner
+                             JWSVerifier Payload UnprotectedHeader UnprotectedHeader$Builder)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
+           (com.nimbusds.jose.util Base64 Base64URL)
+           (java.net URI)
            (java.nio.charset StandardCharsets)
            (java.security Provider Security)
            (java.text ParseException)
@@ -15,7 +17,11 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:private sign-options #{:alg :kid :headers :detached? :b64?})
+(def ^:private registered-header-options
+  #{:jku :jwk :x5u :x5c :x5t :x5t#S256 :typ :cty :crit})
+
+(def ^:private sign-options
+  (into #{:alg :kid :headers :detached? :b64?} registered-header-options))
 (def ^:private verify-options #{:alg :algs :typ :cty :crit})
 
 (def ^:private alg-names
@@ -253,19 +259,33 @@
     (catch RuntimeException e
       (throw (jose-ex :parse-failure "Failed to parse JWS" e {})))))
 
-(defn- apply-header!
-  [^JWSHeader$Builder builder k v]
-  (case k
-    :typ (.type builder (JOSEObjectType. (str v)))
-    :cty (.contentType builder (str v))
-    (.customParam builder (name k) (stringify-json-value v))))
-
 (defn- string-set
   ^java.util.Set [xs]
   (let [set (HashSet.)]
     (doseq [x xs]
-      (.add set (str x)))
+      (.add set (if (keyword? x) (name x) (str x))))
     set))
+
+(defn- public-header-jwk
+  ^JWK [value]
+  (let [^JWK key (jwk/parse value)]
+    (when (.isPrivate key)
+      (invalid-option! :jwk))
+    key))
+
+(defn- apply-header!
+  [^JWSHeader$Builder builder k v]
+  (case k
+    :jku (.jwkURL builder (URI. (str v)))
+    :jwk (.jwk builder (public-header-jwk v))
+    :x5u (.x509CertURL builder (URI. (str v)))
+    :x5c (.x509CertChain builder (mapv #(Base64. (str %)) v))
+    :x5t (.x509CertThumbprint builder (Base64URL. (str v)))
+    :x5t#S256 (.x509CertSHA256Thumbprint builder (Base64URL. (str v)))
+    :typ (.type builder (JOSEObjectType. (str v)))
+    :cty (.contentType builder (str v))
+    :crit (.criticalParams builder (string-set v))
+    (.customParam builder (name k) (stringify-json-value v))))
 
 (defn sign
   "Signs a string or byte-array payload and returns a compact JWS string."
@@ -274,19 +294,35 @@
   (^String [key payload-value opts]
    (validate-options! opts)
    (try
-     (let [^JWK key (jwk/parse key)
-           alg (algorithm (:alg opts (default-alg key)))
+     (let [supplied-signer? (instance? JWSSigner key)
+           ^JWK parsed-key (when-not supplied-signer? (jwk/parse key))
+           alg (algorithm (if (contains? opts :alg)
+                            (:alg opts)
+                            (if supplied-signer?
+                              (invalid-option! :alg)
+                              (default-alg parsed-key))))
            ^JWSHeader$Builder builder (JWSHeader$Builder. alg)
-           kid (if (contains? opts :kid) (:kid opts) (.getKeyID key))]
-       (doseq [[k v] (:headers opts)]
+           kid (if (contains? opts :kid)
+                 (:kid opts)
+                 (when parsed-key (.getKeyID parsed-key)))
+           critical (cond
+                      (contains? opts :crit) (:crit opts)
+                      (contains? (:headers opts) :crit) (get-in opts [:headers :crit])
+                      :else nil)]
+       (doseq [[k v] (dissoc (:headers opts) :crit)]
          (apply-header! builder k v))
+       (doseq [k registered-header-options
+               :when (and (not= :crit k) (contains? opts k))]
+         (apply-header! builder k (get opts k)))
        (when (false? (:b64? opts true))
-         (.base64URLEncodePayload builder false)
-         (.criticalParams builder (string-set ["b64"])))
+         (.base64URLEncodePayload builder false))
+       (when (or critical (false? (:b64? opts true)))
+         (.criticalParams builder (string-set (cond-> (or critical [])
+                                                (false? (:b64? opts true)) (conj "b64")))))
        (when kid
          (.keyID builder kid))
        (let [jws (JWSObject. (.build builder) (->payload payload-value))]
-         (.sign jws (signer key))
+         (.sign jws (if supplied-signer? key (signer parsed-key)))
          (.serialize jws (boolean (:detached? opts false)))))
      (catch JOSEException e
        (throw (jose-ex :sign-failure "Failed to sign JWS" e {}))))))
@@ -305,7 +341,9 @@
    (try
      (let [jws (jws-object compact)]
        (validate-verification-policy! (.getHeader jws) opts)
-       (when-not (.verify jws (verifier (jwk/parse key)))
+       (when-not (.verify jws (if (instance? JWSVerifier key)
+                               key
+                               (verifier (jwk/parse key))))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -326,7 +364,9 @@
    (try
      (let [jws (detached-jws-object compact payload)]
        (validate-verification-policy! (.getHeader jws) opts)
-       (when-not (.verify jws (verifier (jwk/parse key)))
+       (when-not (.verify jws (if (instance? JWSVerifier key)
+                               key
+                               (verifier (jwk/parse key))))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]

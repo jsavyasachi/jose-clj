@@ -3,7 +3,11 @@
             [jose.jwk :as jwk]
             [jose.pem :as pem])
   (:import (clojure.lang ExceptionInfo)
-           (java.security KeyPairGenerator)
+           (com.nimbusds.jose.util X509CertUtils)
+           (java.io FileInputStream)
+           (java.nio.file Files)
+           (java.security KeyPairGenerator KeyStore)
+           (java.security.cert X509Certificate)
            (java.security.spec ECGenParameterSpec)
            (java.util Base64)))
 
@@ -51,6 +55,34 @@
       "EC" (.initialize generator (ECGenParameterSpec. "secp256r1")))
     (.generateKeyPair generator)))
 
+(defn generated-keystore
+  []
+  (let [directory (Files/createTempDirectory "jose-clj-keystore-"
+                                              (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve directory "test.p12")
+        keytool (str (System/getProperty "java.home") "/bin/keytool")
+        process (-> (ProcessBuilder.
+                     [keytool "-genkeypair"
+                      "-alias" "test"
+                      "-keyalg" "RSA"
+                      "-keysize" "2048"
+                      "-dname" "CN=jose-clj-test"
+                      "-validity" "1"
+                      "-storetype" "PKCS12"
+                      "-keystore" (str path)
+                      "-storepass" "changeit"
+                      "-keypass" "changeit"
+                      "-noprompt"])
+                    (.redirectErrorStream true)
+                    (.start))
+        output (String. (.readAllBytes (.getInputStream process)))]
+    (when-not (zero? (.waitFor process))
+      (throw (ex-info "keytool failed" {:output output})))
+    (let [keystore (KeyStore/getInstance "PKCS12")]
+      (with-open [input (FileInputStream. (.toFile path))]
+        (.load keystore input (.toCharArray "changeit")))
+      keystore)))
+
 (deftest generated-jwk-round-trips-through-pem
   (doseq [[label key] [[:rsa (jwk/generate :rsa {:size 2048})]
                        [:ec (jwk/generate :ec {:curve :p-256})]]]
@@ -81,6 +113,20 @@
   (let [parsed (pem/pem->jwk certificate-pem)]
     (is (= :rsa (jwk/key-type parsed)))
     (is (not (jwk/private? parsed)))))
+
+(deftest imports-generated-x509-certificate-and-keystore-entry
+  (let [keystore (generated-keystore)
+        certificate (.getCertificate keystore "test")
+        certificate-jwk (jwk/certificate->jwk certificate)
+        keystore-jwk (jwk/keystore->jwk keystore "test" "changeit")
+        certificate-pem (X509CertUtils/toPEMString certificate)
+        parsed-certificate (pem/pem->certificate certificate-pem)]
+    (is (instance? X509Certificate parsed-certificate))
+    (is (= certificate parsed-certificate))
+    (is (= (jwk/thumbprint certificate-jwk)
+           (jwk/thumbprint (jwk/public-jwk keystore-jwk))))
+    (is (not (jwk/private? certificate-jwk)))
+    (is (jwk/private? keystore-jwk))))
 
 (deftest pem-failures-are-ex-info
   (is (= :invalid-option

@@ -1,17 +1,29 @@
 (ns jose.jwk
   (:require [clojure.string :as str])
   (:import (com.nimbusds.jose Algorithm JOSEException)
-           (com.nimbusds.jose.jwk Curve JWK JWKSet KeyType KeyUse)
+           (com.nimbusds.jose.jwk Curve ECKey$Builder JWK JWKMatcher JWKSet
+                                  KeyOperation KeyRevocation KeyRevocation$Reason
+                                  KeyType KeyUse
+                                  OctetKeyPair$Builder OctetSequenceKey$Builder
+                                  RSAKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator JWKGenerator
                                        OctetKeyPairGenerator
                                        OctetSequenceKeyGenerator
                                        RSAKeyGenerator)
+           (com.nimbusds.jose.util Base64 Base64URL)
+           (java.io File IOException InputStream)
+           (java.net URI)
+           (java.security KeyStore KeyStoreException)
+           (java.security.cert X509Certificate)
            (java.text ParseException)
-           (java.util ArrayList List Map)))
+           (java.time Instant)
+           (java.util ArrayList Date HashSet List Map Set)))
 
 (set! *warn-on-reflection* true)
 
-(def ^:private common-options #{:kid :use :alg})
+(def ^:private common-options
+  #{:kid :use :alg :key-ops :x5c :x5u :x5t :x5t#S256
+    :iat :nbf :exp :revoked})
 (def ^:private type-options
   {:rsa (conj common-options :size)
    :ec (conj common-options :curve)
@@ -106,15 +118,68 @@
     (string? c) (Curve/parse c)
     :else (invalid-option! :curve)))
 
+(defn- key-operation
+  ^KeyOperation [operation]
+  (case operation
+    :sign KeyOperation/SIGN
+    :verify KeyOperation/VERIFY
+    :encrypt KeyOperation/ENCRYPT
+    :decrypt KeyOperation/DECRYPT
+    :wrap-key KeyOperation/WRAP_KEY
+    :unwrap-key KeyOperation/UNWRAP_KEY
+    :derive-key KeyOperation/DERIVE_KEY
+    :derive-bits KeyOperation/DERIVE_BITS
+    (invalid-option! :key-ops)))
+
+(defn- java-set
+  ^Set [xs]
+  (let [result (HashSet.)]
+    (doseq [x xs]
+      (.add result x))
+    result))
+
+(defn- date
+  ^Date [option value]
+  (cond
+    (nil? value) nil
+    (instance? Date value) value
+    (instance? Instant value) (Date/from ^Instant value)
+    (integer? value) (Date. (* 1000 (long value)))
+    :else (invalid-option! option)))
+
+(defn- key-revocation
+  ^KeyRevocation [value]
+  (cond
+    (instance? KeyRevocation value) value
+    (map? value)
+    (let [reason (:reason value)
+          reason (cond
+                   (instance? KeyRevocation$Reason reason) reason
+                   (keyword? reason) (KeyRevocation$Reason/parse (name reason))
+                   (string? reason) (KeyRevocation$Reason/parse reason)
+                   :else (invalid-option! :revoked))]
+      (KeyRevocation. (date :revoked (:at value)) reason))
+    :else (invalid-option! :revoked)))
+
 (defn- configure-generator!
   [^JWKGenerator generator opts]
   (let [use (key-use (:use opts))
         alg (algorithm (:alg opts))
-        kid (:kid opts)]
+        kid (:kid opts)
+        operations (when-let [operations (:key-ops opts)]
+                     (java-set (map key-operation operations)))]
     (when use
       (.keyUse generator use))
+    (when operations
+      (.keyOperations generator operations))
     (when alg
       (.algorithm generator alg))
+    (when (contains? opts :iat)
+      (.issueTime generator (date :iat (:iat opts))))
+    (when (contains? opts :nbf)
+      (.notBeforeTime generator (date :nbf (:nbf opts))))
+    (when (contains? opts :exp)
+      (.expirationTime generator (date :exp (:exp opts))))
     (if (contains? opts :kid)
       (.keyID generator kid)
       (.keyIDFromThumbprint generator true))
@@ -157,6 +222,35 @@
        (map? s-or-map) (JWK/parse ^Map (stringify-json-value s-or-map))
        :else (throw (IllegalArgumentException. "Expected JWK, JSON string, or map"))))))
 
+(defn certificate->jwk
+  "Imports the public key and X.509 metadata from a certificate."
+  ^JWK [certificate]
+  (wrap-jose
+   :key-import-failure
+   "Failed to import X.509 certificate"
+   #(JWK/parse ^X509Certificate certificate)))
+
+(defn keystore->jwk
+  "Imports a key store entry by alias. The PIN may be a string, char array, or nil."
+  ^JWK [keystore alias pin]
+  (let [pin (cond
+              (nil? pin) nil
+              (string? pin) (.toCharArray ^String pin)
+              (= (class pin) (Class/forName "[C")) pin
+              :else (invalid-option! :pin))]
+    (try
+      (JWK/load ^KeyStore keystore (str alias) ^chars pin)
+      (catch KeyStoreException e
+        (throw (jose-ex :key-import-failure
+                        "Failed to import key store entry"
+                        e
+                        {:alias alias})))
+      (catch JOSEException e
+        (throw (jose-ex :key-import-failure
+                        "Failed to import key store entry"
+                        e
+                        {:alias alias}))))))
+
 (defn ->map
   "Returns the complete JWK JSON representation as a Clojure map."
   [jwk]
@@ -195,6 +289,16 @@
      (let [^JWK jwk (parse jwk)]
        (str (.computeThumbprint jwk))))))
 
+(defn thumbprint-uri
+  "Returns the RFC 9278 JWK thumbprint URI for the SHA-256 thumbprint."
+  [jwk]
+  (wrap-jose
+   :thumbprint-failure
+   "Failed to compute JWK thumbprint URI"
+   (fn []
+     (let [^JWK jwk (parse jwk)]
+       (str (.computeThumbprintURI jwk))))))
+
 (defn key-type
   [jwk]
   (let [^JWK jwk (parse jwk)
@@ -216,6 +320,72 @@
   (let [^JWK jwk (parse jwk)]
     (.isPrivate jwk)))
 
+(defn- set-rsa-x509!
+  [^RSAKey$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
+  (.build builder))
+
+(defn- set-ec-x509!
+  [^ECKey$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
+  (.build builder))
+
+(defn- set-oct-x509!
+  [^OctetSequenceKey$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
+  (.build builder))
+
+(defn- set-okp-x509!
+  [^OctetKeyPair$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
+  (.build builder))
+
+(defn- configure-metadata
+  ^JWK [^JWK generated opts]
+  (if-not (some #(contains? opts %) [:x5c :x5u :x5t :x5t#S256 :revoked])
+    generated
+    (case (key-type generated)
+      :rsa (set-rsa-x509! (RSAKey$Builder. (.toRSAKey generated)) opts)
+      :ec (set-ec-x509! (ECKey$Builder. (.toECKey generated)) opts)
+      :oct (set-oct-x509! (OctetSequenceKey$Builder. (.toOctetSequenceKey generated)) opts)
+      :okp (set-okp-x509! (OctetKeyPair$Builder. (.toOctetKeyPair generated)) opts))))
+
 (defn generate
   "Generates a Nimbus JWK. Kind is one of :rsa, :ec, :okp, or :oct."
   (^JWK [kind]
@@ -230,16 +400,16 @@
         :rsa (let [^RSAKeyGenerator generator
                    (RSAKeyGenerator. (long (:size opts 2048)))]
                (configure-generator! generator opts)
-               (.generate generator))
+               (configure-metadata (.generate generator) opts))
         :ec (let [^ECKeyGenerator generator
                   (ECKeyGenerator. (curve (:curve opts :p-256)))]
               (configure-generator! generator opts)
-              (.generate generator))
+              (configure-metadata (.generate generator) opts))
         :okp (try
                (let [^OctetKeyPairGenerator generator
                      (OctetKeyPairGenerator. (curve (:curve opts :ed25519)))]
                  (configure-generator! generator opts)
-                 (.generate generator))
+                 (configure-metadata (.generate generator) opts))
                (catch NoClassDefFoundError e
                  (throw (jose-ex :missing-optional-dep
                                  "Missing optional Tink dependency"
@@ -248,11 +418,14 @@
         :oct (let [^OctetSequenceKeyGenerator generator
                    (OctetSequenceKeyGenerator. (long (:size opts 256)))]
                (configure-generator! generator opts)
-               (.generate generator)))))))
+               (configure-metadata (.generate generator) opts)))))))
 
 (defn jwk-set
-  ^JWKSet [jwks]
-  (JWKSet. (java-list (map parse jwks))))
+  (^JWKSet [jwks]
+   (jwk-set jwks {}))
+  (^JWKSet [jwks members]
+   (JWKSet. (java-list (map parse jwks))
+            (stringify-json-value members))))
 
 (defn parse-set
   "Parses a JWKS JSON string, Clojure map, or returns a Nimbus JWKSet unchanged."
@@ -265,6 +438,19 @@
        (map? s-or-map) (JWKSet/parse ^Map (stringify-json-value s-or-map))
        :else (throw (IllegalArgumentException. "Expected JWKSet, JSON string, or map"))))))
 
+(defn load-set
+  "Loads a JWK set from a file, input stream, JSON string, or Nimbus JWKSet."
+  ^JWKSet [source]
+  (try
+    (cond
+      (instance? File source) (JWKSet/load ^File source)
+      (instance? InputStream source) (JWKSet/load ^InputStream source)
+      :else (parse-set source))
+    (catch IOException e
+      (throw (jose-ex :parse-failure "Failed to load JWK set" e {})))
+    (catch ParseException e
+      (throw (jose-ex :parse-failure "Failed to load JWK set" e {})))))
+
 (defn set->maps
   [jwks]
   (let [^JWKSet jwks (parse-set jwks)]
@@ -275,10 +461,33 @@
   (let [^JWKSet jwks (parse-set jwks)]
     (.getKeyByKeyId jwks kid)))
 
-(defn- public-jwk-set
+(defn set-contains?
+  "Returns true when the set contains a JWK with the same thumbprint."
+  [jwks candidate]
+  (wrap-jose
+   :thumbprint-failure
+   "Failed to compare JWK thumbprints"
+   (fn []
+     (let [^JWKSet jwks (parse-set jwks)]
+       (.containsJWK jwks (parse candidate))))))
+
+(defn filter-set
+  "Returns the JWKs matching a Nimbus JWKMatcher."
+  ^JWKSet [jwks matcher]
+  (let [^JWKSet jwks (parse-set jwks)]
+    (.filter jwks ^JWKMatcher matcher)))
+
+(defn set-members
+  "Returns top-level JWK set members other than keys."
+  [jwks]
+  (let [^JWKSet jwks (parse-set jwks)]
+    (keywordize-json-value (.getAdditionalMembers jwks))))
+
+(defn public-jwk-set
+  "Returns a public JWK set with all private and symmetric material removed."
   ^JWKSet [jwks]
   (let [^JWKSet jwks (parse-set jwks)]
-    (jwk-set (keep public-jwk (.getKeys jwks)))))
+    (.toPublicJWKSet jwks)))
 
 (defn set->json
   (^String [jwks]

@@ -4,7 +4,8 @@
             [jose.jwks :as jwks]
             [jose.jws :as jws])
   (:import (clojure.lang ExceptionInfo)
-           (com.nimbusds.jose.jwk Curve OctetSequenceKey$Builder)
+           (com.nimbusds.jose.crypto MACSigner MACVerifier)
+           (com.nimbusds.jose.jwk Curve JWK OctetSequenceKey OctetSequenceKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator)
            (com.nimbusds.jose.util Base64URL)
            (java.nio.charset StandardCharsets)
@@ -130,6 +131,54 @@
     (is (= {:alg :rs512 :kid "explicit" :example "ok"}
            (jws/header compact)))
     (is (= "hello" (:payload (jws/verify (jwk/public-jwk key) compact {:algs #{:rs512}}))))))
+
+(deftest caller-supplied-providers
+  (let [^JWK key (jwk/generate :oct {:size 256})
+        oct (.toOctetSequenceKey key)
+        signer (MACSigner. ^OctetSequenceKey oct)
+        verifier (MACVerifier. ^OctetSequenceKey oct)
+        compact (jws/sign signer "provider-backed" {:alg :hs256})
+        detached (jws/sign signer "provider-backed" {:alg :hs256 :detached? true})]
+    (is (= "provider-backed"
+           (:payload (jws/verify verifier compact {:algs #{:hs256}}))))
+    (is (= "provider-backed"
+           (:payload (jws/verify-detached verifier detached "provider-backed"
+                                          {:algs #{:hs256}}))))
+    (is (= :algorithm-not-allowed
+           (:jose/error (thrown-data #(jws/verify verifier compact {:algs #{:hs512}})))))))
+
+(deftest registered-header-options-round-trip
+  (let [signing-key (jwk/generate :oct {:size 256})
+        public-jwk (jwk/public-jwk (jwk/generate :rsa {:kid "embedded"}))
+        compact (jws/sign signing-key "headers"
+                          {:jku "https://example.test/jwks.json"
+                           :jwk public-jwk
+                           :x5u "https://example.test/cert.pem"
+                           :x5c ["AQID"]
+                           :x5t "AQID"
+                           :x5t#S256 "BAUG"
+                           :typ "JOSE"
+                           :cty "text/plain"
+                           :crit #{"exp"}
+                           :headers {:exp true}})
+        header (jws/header compact)]
+    (is (= "https://example.test/jwks.json" (:jku header)))
+    (is (= "RSA" (get-in header [:jwk :kty])))
+    (is (not (contains? (:jwk header) :d)))
+    (is (= "https://example.test/cert.pem" (:x5u header)))
+    (is (= ["AQID"] (:x5c header)))
+    (is (= "AQID" (:x5t header)))
+    (is (= "BAUG" (:x5t#S256 header)))
+    (is (= "JOSE" (:typ header)))
+    (is (= "text/plain" (:cty header)))
+    (is (= ["exp"] (:crit header)))
+    (is (= true (:exp header))))
+  (let [signing-key (jwk/generate :oct {:size 256})
+        private-jwk (jwk/generate :rsa)]
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jws/sign signing-key "headers" {:jwk private-jwk})))))
+    (is (= :jwk
+           (:option (thrown-data #(jws/sign signing-key "headers" {:jwk private-jwk})))))))
 
 (deftest verification-policy
   (let [key (jwk/generate :oct {:size 512})

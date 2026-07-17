@@ -1,9 +1,10 @@
 (ns jose.jwe
   (:require [clojure.string :as str]
             [jose.jwk :as jwk])
-  (:import (com.nimbusds.jose EncryptionMethod JOSEException JOSEObjectType JWEAlgorithm JWEDecrypter JWEEncrypter
-                             JWEHeader JWEHeader$Builder JWEObject JWEObjectJSON JWEObjectJSON$Recipient
-                             KeyLengthException Payload UnprotectedHeader UnprotectedHeader$Builder)
+  (:import (com.nimbusds.jose CompressionAlgorithm EncryptionMethod JOSEException JOSEObjectType
+                             JWEAlgorithm JWEDecrypter JWEEncrypter JWEHeader JWEHeader$Builder
+                             JWEObject JWEObjectJSON JWEObjectJSON$Recipient KeyLengthException Payload
+                             UnprotectedHeader UnprotectedHeader$Builder)
            (com.nimbusds.jose.crypto AESDecrypter AESEncrypter DirectDecrypter DirectEncrypter
                                       ECDH1PUDecrypter ECDH1PUEncrypter ECDH1PUX25519Decrypter
                                       ECDH1PUX25519Encrypter ECDHDecrypter ECDHEncrypter
@@ -11,13 +12,20 @@
                                       PasswordBasedEncrypter RSADecrypter RSAEncrypter X25519Decrypter
                                       X25519Encrypter)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
+           (com.nimbusds.jose.util Base64 Base64URL)
+           (java.net URI)
            (java.nio.charset StandardCharsets)
            (java.text ParseException)
-           (java.util List Map)))
+           (java.util Arrays HashMap List Map)))
 
 (set! *warn-on-reflection* true)
 
-(def ^:private encrypt-options #{:alg :enc :kid :headers :salt-length :iteration-count})
+(def ^:private registered-header-options
+  #{:jku :jwk :x5u :x5c :x5t :x5t#S256 :typ :cty :crit :zip})
+
+(def ^:private encrypt-options
+  (into #{:alg :enc :kid :headers :salt-length :iteration-count}
+        registered-header-options))
 
 (def ^:private alg-names
   {:rsa-oaep-256 "RSA-OAEP-256"
@@ -106,6 +114,10 @@
   (let [name (str enc)]
     (get name-encs name (keyword (str/lower-case name)))))
 
+(defn- zip-keyword
+  [zip]
+  (keyword (str/lower-case (str zip))))
+
 (defn- stringify-json-value
   [x]
   (cond
@@ -129,7 +141,8 @@
   [^JWEHeader header]
   (cond-> (keywordize-json-value (.toJSONObject header))
     (.getAlgorithm header) (update :alg alg-keyword)
-    (.getEncryptionMethod header) (update :enc enc-keyword)))
+    (.getEncryptionMethod header) (update :enc enc-keyword)
+    (.getCompressionAlgorithm header) (update :zip zip-keyword)))
 
 (defn- ->payload
   ^Payload [payload]
@@ -256,6 +269,7 @@
   (let [alg (.getAlgorithm header)
         key-type (when (instance? JWK key) (.getKeyType ^JWK key))]
     (cond
+      (instance? JWEDecrypter key) key
       (contains? pbes2-algs alg) (password-decrypter key)
       (contains? ecdh-1pu-algs alg) (ecdh-1pu-decrypter key)
       (= KeyType/RSA key-type) (RSADecrypter. ^RSAKey (.toRSAKey ^JWK key))
@@ -277,11 +291,38 @@
     (catch RuntimeException e
       (throw (jose-ex :parse-failure "Failed to parse JWE" e {})))))
 
+(defn- string-set
+  ^java.util.Set [xs]
+  (set (map #(if (keyword? %) (name %) (str %)) xs)))
+
+(defn- public-header-jwk
+  ^JWK [value]
+  (let [^JWK key (jwk/parse value)]
+    (when (.isPrivate key)
+      (invalid-option! :jwk))
+    key))
+
+(defn- compression-algorithm
+  ^CompressionAlgorithm [zip]
+  (cond
+    (instance? CompressionAlgorithm zip) zip
+    (keyword? zip) (CompressionAlgorithm. (str/upper-case (name zip)))
+    (string? zip) (CompressionAlgorithm. zip)
+    :else (invalid-option! :zip)))
+
 (defn- apply-header!
   [^JWEHeader$Builder builder k v]
   (case k
+    :jku (.jwkURL builder (URI. (str v)))
+    :jwk (.jwk builder (public-header-jwk v))
+    :x5u (.x509CertURL builder (URI. (str v)))
+    :x5c (.x509CertChain builder (mapv #(Base64. (str %)) v))
+    :x5t (.x509CertThumbprint builder (Base64URL. (str v)))
+    :x5t#S256 (.x509CertSHA256Thumbprint builder (Base64URL. (str v)))
     :typ (.type builder (JOSEObjectType. (str v)))
     :cty (.contentType builder (str v))
+    :crit (.criticalParams builder (string-set v))
+    :zip (.compressionAlgorithm builder (compression-algorithm v))
     (.customParam builder (name k) (stringify-json-value v))))
 
 (defn- direct-alg?
@@ -295,6 +336,7 @@
 (defn- build-encrypter
   ^JWEEncrypter [key ^JWEAlgorithm alg opts]
   (cond
+    (instance? JWEEncrypter key) key
     (contains? pbes2-algs alg) (password-encrypter key opts)
     (contains? ecdh-1pu-algs alg) (ecdh-1pu-encrypter key)
     (direct-encrypter? alg) (DirectEncrypter. ^OctetSequenceKey (.toOctetSequenceKey ^JWK key))
@@ -316,7 +358,8 @@
   (^String [key payload-value opts]
    (validate-options! opts)
    (try
-     (let [special-key? (or (password? key) (ecdh-1pu-keys? key))
+     (let [supplied-encrypter? (instance? JWEEncrypter key)
+           special-key? (or supplied-encrypter? (password? key) (ecdh-1pu-keys? key))
            key (if special-key? key (jwk/parse key))
            alg (algorithm (if (contains? opts :alg)
                             (:alg opts)
@@ -332,10 +375,14 @@
                    (instance? JWK key) (.getKeyID ^JWK key)
                    :else nil))]
        (when (and (direct-alg? alg)
+                  (not supplied-encrypter?)
                   (or special-key? (not= KeyType/OCT (.getKeyType ^JWK key))))
          (invalid-option! :alg))
        (doseq [[k v] (:headers opts)]
          (apply-header! builder k v))
+       (doseq [k registered-header-options
+               :when (contains? opts k)]
+         (apply-header! builder k (get opts k)))
        (when kid
          (.keyID builder kid))
        (let [jwe (JWEObject. (.build builder) (->payload payload-value))]
@@ -355,7 +402,8 @@
     (let [jwe (jwe-object compact)
           ^JWEHeader header (.getHeader jwe)]
       (.decrypt jwe (decrypter (if (or (contains? pbes2-algs (.getAlgorithm header))
-                                       (contains? ecdh-1pu-algs (.getAlgorithm header)))
+                                       (contains? ecdh-1pu-algs (.getAlgorithm header))
+                                       (instance? JWEDecrypter key))
                                  key
                                  (jwk/parse key))
                                header))
@@ -421,7 +469,8 @@
                                (invalid-option! :alg)
                                (default-alg parsed-first))))
             enc (encryption-method (:enc opts :a256gcm))
-            builder (if (= :flattened serialization)
+            builder (if (or (= :flattened serialization)
+                            (and special-key? (= 1 (count keys))))
                       (JWEHeader$Builder. alg enc)
                       (JWEHeader$Builder. enc))
             protected-kid (when (and (= :flattened serialization)
@@ -432,13 +481,17 @@
                                 (.getKeyID ^JWK parsed-first))))]
         (doseq [[k v] (:protected-headers opts)]
           (apply-header! builder k v))
+        (doseq [k registered-header-options
+                :when (contains? opts k)]
+          (apply-header! builder k (get opts k)))
         (when protected-kid
           (.keyID builder protected-kid))
         (let [object (JWEObjectJSON. (.build builder)
                                      (->payload payload-value)
                                      (unprotected-header (:unprotected-headers opts))
                                      nil)
-              encrypter (if (= :general serialization)
+              encrypter (if (and (= :general serialization)
+                                 (not special-key?))
                           (MultiEncrypter. (jwk/jwk-set (map #(multi-recipient-key % alg) keys)))
                           (build-encrypter parsed-first alg opts))]
           (.encrypt object encrypter)
@@ -465,6 +518,48 @@
     {:unprotected-header (when header
                            (keywordize-json-value (.toJSONObject header)))}))
 
+(defn- effective-json-header
+  ^JWEHeader [^JWEObjectJSON object]
+  (let [^JWEHeader protected-header (.getHeader object)
+        ^UnprotectedHeader unprotected-header (.getUnprotectedHeader object)
+        ^JWEObjectJSON$Recipient recipient (first (.getRecipients object))
+        ^UnprotectedHeader recipient-header (.getUnprotectedHeader recipient)
+        params (HashMap.)]
+    (when unprotected-header
+      (.putAll params (.toJSONObject unprotected-header)))
+    (when recipient-header
+      (.putAll params (.toJSONObject recipient-header)))
+    (.putAll params (.toJSONObject protected-header))
+    (JWEHeader/parse ^Map params)))
+
+(defn- merged-aad
+  ^bytes [^JWEHeader header ^bytes aad]
+  (let [aad-string (String. aad StandardCharsets/US_ASCII)
+        separator (.indexOf aad-string ".")
+        suffix (if (neg? separator) "" (subs aad-string separator))]
+    (.getBytes (str (.toBase64URL header) suffix) StandardCharsets/US_ASCII)))
+
+(defn- decrypter-with-header
+  ^JWEDecrypter [^JWEDecrypter delegate ^JWEHeader header]
+  (reify JWEDecrypter
+    (supportedJWEAlgorithms [_]
+      (.supportedJWEAlgorithms delegate))
+    (supportedEncryptionMethods [_]
+      (.supportedEncryptionMethods delegate))
+    (getJCAContext [_]
+      (.getJCAContext delegate))
+    (decrypt [_ _ encrypted-key iv cipher-text auth-tag aad]
+      (try
+        (.decrypt delegate header encrypted-key iv cipher-text auth-tag aad)
+        (catch JOSEException first-error
+          (let [alternate-aad (merged-aad header aad)]
+            (if (Arrays/equals aad alternate-aad)
+              (throw first-error)
+              (try
+                (.decrypt delegate header encrypted-key iv cipher-text auth-tag alternate-aad)
+                (catch JOSEException _
+                  (throw first-error))))))))))
+
 (defn decrypt-json
   "Parses and decrypts flattened or general JWE JSON."
   [key json]
@@ -472,10 +567,15 @@
     (let [object (jwe-json-object json)
           header (.getHeader object)
           recipients (.getRecipients object)
-          parsed-key (jwk/parse key)
+          special-key? (or (password? key)
+                           (ecdh-1pu-keys? key)
+                           (instance? JWEDecrypter key))
+          parsed-key (if special-key? key (jwk/parse key))
           decrypter (if (< 1 (count recipients))
                       (MultiDecrypter. parsed-key)
-                      (decrypter parsed-key header))]
+                      (let [effective-header (effective-json-header object)]
+                        (decrypter-with-header (decrypter parsed-key effective-header)
+                                               effective-header)))]
       (.decrypt object decrypter)
       (let [^Payload payload (.getPayload object)
             bytes (.toBytes payload)

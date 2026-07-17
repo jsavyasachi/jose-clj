@@ -1,8 +1,14 @@
 (ns jose.jwk-test
   (:require [clojure.test :refer [deftest is testing]]
-            [jose.jwk :as jwk])
+            [jose.jwk :as jwk]
+            [jose.jwks :as jwks])
   (:import (clojure.lang ExceptionInfo)
-           (com.nimbusds.jose.jwk JWK JWKSet)))
+           (com.nimbusds.jose.jwk JWK JWKSet)
+           (java.io ByteArrayInputStream File)
+           (java.nio.charset StandardCharsets)
+           (java.nio.file Files)
+           (java.time Instant)
+           (java.util Date)))
 
 ;; Test vector sourced from RFC 7638 section 3.1.
 (def rfc-7638-rsa-jwk
@@ -41,6 +47,41 @@
 (deftest generate-adds-kid-from-thumbprint-by-default
   (let [generated (jwk/generate :rsa {})]
     (is (= (jwk/thumbprint generated) (jwk/key-id generated)))))
+
+(deftest generate-round-trips-complete-metadata
+  (let [generated (jwk/generate :rsa
+                                {:kid "metadata"
+                                 :use :sig
+                                 :alg :rs256
+                                 :key-ops [:sign :verify]
+                                 :x5u "https://example.test/cert.pem"
+                                 :x5t "AQID"
+                                 :x5t#S256 "BAUG"
+                                 :iat (Instant/ofEpochSecond 100)
+                                 :nbf (Date. 200000)
+                                 :exp 300
+                                 :revoked {:at 400 :reason :compromised}})
+        generated-map (jwk/->map generated)
+        metadata (select-keys generated-map
+                              [:kid :use :alg :x5u :x5t :x5t#S256
+                               :iat :nbf :exp :revoked])]
+    (is (= {:kid "metadata"
+            :use "sig"
+            :alg "RS256"
+            :x5u "https://example.test/cert.pem"
+            :x5t "AQID"
+            :x5t#S256 "BAUG"
+            :iat 100
+            :nbf 200
+            :exp 300
+            :revoked {:revoked_at 400 :reason "compromised"}}
+           metadata))
+    (is (= #{"sign" "verify"} (set (:key_ops generated-map))))))
+
+(deftest thumbprint-uri-is-rfc-9278-jkt-uri
+  (let [thumbprint (jwk/thumbprint rfc-7638-rsa-jwk)]
+    (is (= (str "urn:ietf:params:oauth:jwk-thumbprint:sha-256:" thumbprint)
+           (jwk/thumbprint-uri rfc-7638-rsa-jwk)))))
 
 (deftest conversion-and-public-views
   (let [rsa (jwk/generate :rsa {:kid "rsa-1"})
@@ -87,3 +128,35 @@
     (is (not (contains? (first (jwk/set->maps parsed-public)) :d)))
     (is (= #{:rsa :oct} (set (map jwk/key-type (.getKeys parsed-private)))))
     (is (some #(contains? % :d) (jwk/set->maps parsed-private)))))
+
+(deftest advanced-jwk-set-operations
+  (let [rsa (jwk/generate :rsa {:kid "rsa"})
+        ec (jwk/generate :ec {:kid "ec" :curve :p-256})
+        oct (jwk/generate :oct {:kid "oct"})
+        jwks (jwk/jwk-set [rsa ec oct] {:issuer "example"})
+        public-set (jwk/public-jwk-set jwks)
+        filtered (jwk/filter-set jwks (jwks/matcher {:kty :ec}))]
+    (is (jwk/set-contains? jwks (jwk/public-jwk rsa)))
+    (is (not (jwk/set-contains? jwks (jwk/generate :rsa))))
+    (is (= ["ec"] (mapv jwk/key-id (.getKeys filtered))))
+    (is (= {:issuer "example"} (jwk/set-members jwks)))
+    (is (= {:issuer "example"} (jwk/set-members public-set)))
+    (is (= #{"rsa" "ec"} (set (map jwk/key-id (.getKeys public-set)))))
+    (is (every? (complement jwk/private?) (.getKeys public-set)))
+    (is (every? #(not-any? (partial contains? %)
+                           [:d :p :q :dp :dq :qi :oth :k])
+                (jwk/set->maps public-set)))))
+
+(deftest loads-jwk-sets-from-file-stream-and-string
+  (let [jwks (jwk/jwk-set [(jwk/generate :rsa {:kid "loaded"})]
+                          {:issuer "example"})
+        json (jwk/set->json jwks {:private? true})
+        file (.toFile (Files/createTempFile "jose-clj-jwks-" ".json"
+                                             (make-array java.nio.file.attribute.FileAttribute 0)))
+        bytes (.getBytes json StandardCharsets/UTF_8)]
+    (spit file json)
+    (doseq [loaded [(jwk/load-set ^File file)
+                    (jwk/load-set (ByteArrayInputStream. bytes))
+                    (jwk/load-set json)]]
+      (is (= ["loaded"] (mapv jwk/key-id (.getKeys loaded))))
+      (is (= {:issuer "example"} (jwk/set-members loaded))))))

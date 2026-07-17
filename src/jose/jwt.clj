@@ -1,25 +1,38 @@
 (ns jose.jwt
-  (:require [clojure.string :as str]
+  (:require [clojure.set :as set]
+            [clojure.string :as str]
             [jose.jwe :as jwe]
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
-  (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder JWSProvider)
+  (:import (com.nimbusds.jose EncryptionMethod Header JOSEException JOSEObjectType JWEAlgorithm JWEHeader JWSAlgorithm JWSHeader JWSHeader$Builder JWSProvider)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
-           (com.nimbusds.jwt JWTClaimsSet JWTClaimsSet$Builder SignedJWT)
+           (com.nimbusds.jose.jwk.source JWKSource)
+           (com.nimbusds.jose.proc BadJOSEException BadJWEException BadJWSException DefaultJOSEObjectTypeVerifier
+                                   JWEDecryptionKeySelector JWEKeySelector JWSVerificationKeySelector SecurityContext)
+           (com.nimbusds.jwt EncryptedJWT JWT JWTClaimsSet JWTClaimsSet$Builder JWTParser PlainJWT SignedJWT)
+           (com.nimbusds.jwt.proc BadJWTException ConfigurableJWTProcessor DefaultJWTClaimsVerifier
+                                  DefaultJWTProcessor ExpiredJWTException JWTClaimsSetVerifier)
            (java.security Provider Security)
            (java.text ParseException)
            (java.time Instant)
-           (java.util ArrayList Date List)))
+           (java.util ArrayList Date HashSet List Map Set)))
 
 (set! *warn-on-reflection* true)
+
+(deftype JWTContext [value]
+  SecurityContext)
 
 (def ^:private sign-options #{:alg :kid :headers :now-iat? :expires-in})
 (def ^:private encrypt-options #{:alg :enc :kid :headers :now-iat? :expires-in})
 (def ^:private jwe-options #{:alg :enc :kid :headers})
-(def ^:private claim-verification-options #{:aud :iss :clock-skew :required :max-age})
+(def ^:private claim-verification-options
+  #{:aud :iss :clock-skew :required :max-age :exact :prohibited :verifier})
 (def ^:private verify-options (into claim-verification-options #{:alg :algs :typ :cty :crit}))
+(def ^:private processor-options
+  (into claim-verification-options
+        #{:jws-alg :jws-algs :jwe-alg :jwe-algs :jwe-enc :jwe-encs :typ}))
 (def ^:private registered-claims #{"iss" "sub" "aud" "exp" "nbf" "iat" "jti"})
 
 (def ^:private alg-names
@@ -88,6 +101,50 @@
                            x))
     (sequential? x) (mapv stringify-json-value x)
     :else x))
+
+(defn- keywordize-json-value
+  [x]
+  (cond
+    (instance? Map x) (into {} (map (fn [[k v]]
+                                      [(keyword k) (keywordize-json-value v)])
+                                    x))
+    (instance? List x) (mapv keywordize-json-value x)
+    :else x))
+
+(defn- header-map
+  [^Header header]
+  (cond-> (keywordize-json-value (.toJSONObject header))
+    (.getAlgorithm header) (update :alg #(keyword (str/lower-case (str %))))
+    (instance? JWEHeader header) (update :enc #(keyword (str/lower-case (str %))))))
+
+(defn- parsed-jwt
+  ^JWT [compact]
+  (try
+    (JWTParser/parse ^String compact)
+    (catch ParseException e
+      (throw (jose-ex :parse-failure "Failed to parse JWT" e {})))
+    (catch RuntimeException e
+      (throw (jose-ex :parse-failure "Failed to parse JWT" e {})))))
+
+(defn parse
+  "Inspects a compact JWT and returns its type and unverified header.
+
+  This only parses attacker-controlled data. It does not verify a signature,
+  decrypt content, validate claims, or establish trust."
+  [compact]
+  (let [jwt (parsed-jwt compact)]
+    {:type (cond
+             (instance? SignedJWT jwt) :signed
+             (instance? EncryptedJWT jwt) :encrypted
+             (instance? PlainJWT jwt) :plain)
+     :header (header-map (.getHeader jwt))}))
+
+(defn parse-type
+  "Returns the unverified compact JWT type: :plain, :signed, or :encrypted.
+
+  This is inspection-only and does not establish trust."
+  [compact]
+  (:type (parse compact)))
 
 (defn- bouncy-castle-provider
   ^Provider []
@@ -294,47 +351,324 @@
                  "JWT contains unsupported critical headers"
                  {:headers (set unsupported)}))))))
 
-(defn- require-claim!
-  [claims claim]
-  (let [k (if (keyword? claim) claim (str claim))]
-    (when-not (contains? claims k)
-      (fail! :missing-claim "Missing required JWT claim" {:claim k}))))
+(defn- claim-name
+  [claim]
+  (if (keyword? claim) (name claim) (str claim)))
 
-(defn- validate-claims!
-  [claims opts]
-  (let [now (Instant/now)
-        skew (long (:clock-skew opts 0))]
-    (when-let [exp (:exp claims)]
-      (when (.isBefore ^Instant exp (.minusSeconds now skew))
-        (fail! :expired "JWT is expired" {:claim :exp})))
-    (when-let [nbf (:nbf claims)]
-      (when (.isAfter ^Instant nbf (.plusSeconds now skew))
-        (fail! :not-yet-valid "JWT is not yet valid" {:claim :nbf})))
-    (when-let [expected (:aud opts)]
-      (when-not (some #{expected} (:aud claims))
-        (fail! :claim-mismatch "JWT audience does not match" {:claim :aud
-                                                              :expected expected
-                                                              :actual (:aud claims)})))
-    (when-let [expected (:iss opts)]
-      (when-not (= expected (:iss claims))
-        (fail! :claim-mismatch "JWT issuer does not match" {:claim :iss
-                                                            :expected expected
-                                                            :actual (:iss claims)})))
-    (when (contains? opts :max-age)
-      (let [iat (:iat claims)]
-        (when-not iat
-          (fail! :missing-claim "Missing required JWT claim" {:claim :iat}))
-        (when (.isBefore ^Instant iat (.minusSeconds now (+ (long (:max-age opts)) skew)))
-          (fail! :too-old "JWT exceeds maximum age" {:claim :iat
-                                                      :max-age (:max-age opts)}))))
-    (doseq [claim (:required opts)]
-      (require-claim! claims claim))))
+(defn- java-set
+  ^Set [xs]
+  (HashSet. ^java.util.Collection (mapv claim-name xs)))
+
+(defn- audiences
+  [aud]
+  (cond
+    (nil? aud) nil
+    (or (sequential? aud) (set? aud)) (java-set aud)
+    :else (java-set [aud])))
+
+(defn- exact-claims
+  [opts]
+  (cond-> (:exact opts {})
+    (contains? opts :iss) (assoc :iss (:iss opts))))
+
+(defn- default-claims-verifier
+  ^DefaultJWTClaimsVerifier [opts]
+  (let [verifier (DefaultJWTClaimsVerifier.
+                  (audiences (:aud opts))
+                  (claims-set (exact-claims opts) {})
+                  (java-set (:required opts))
+                  (java-set (:prohibited opts)))]
+    (.setMaxClockSkew verifier (int (:clock-skew opts 0)))
+    verifier))
+
+(defn- verifier-failure
+  [error message data]
+  (BadJWTException. message (jose-ex error message nil data)))
+
+(defn- verify-additional-claims!
+  [claims context opts]
+  (when (contains? opts :max-age)
+    (let [iat (:iat claims)
+          now (Instant/now)
+          skew (long (:clock-skew opts 0))]
+      (when-not iat
+        (throw (verifier-failure :missing-claim
+                                 "Missing required JWT claim"
+                                 {:claim :iat})))
+      (when (.isBefore ^Instant iat (.minusSeconds now (+ (long (:max-age opts)) skew)))
+        (throw (verifier-failure :too-old
+                                 "JWT exceeds maximum age"
+                                 {:claim :iat :max-age (:max-age opts)})))))
+  (when-let [custom (:verifier opts)]
+    (try
+      (let [context (if (instance? JWTContext context)
+                      (.-value ^JWTContext context)
+                      context)]
+        (when-not (custom claims context)
+          (throw (jose-ex :claim-verification-failure
+                          "Custom JWT claims verifier rejected claims"
+                          nil
+                          {}))))
+      (catch Exception e
+        (throw (BadJWTException. "Custom JWT claims verification failed" e))))))
+
+(defn claims-verifier
+  "Returns a Nimbus JWTClaimsSetVerifier for a Clojure claims policy.
+
+  :exact requires exact claim values. :aud accepts one audience or a collection
+  where any match is accepted. :prohibited rejects named claims. :verifier is
+  called with the normalized claims map and processor security context and must
+  return truthy. Existing :iss, :required, :clock-skew, and :max-age options are
+  also supported."
+  ^JWTClaimsSetVerifier [opts]
+  (validate-options! claim-verification-options opts)
+  (when (and (contains? opts :verifier) (not (ifn? (:verifier opts))))
+    (invalid-option! :verifier))
+  (let [delegate (default-claims-verifier opts)]
+    (reify JWTClaimsSetVerifier
+      (verify [_ jwt-claims context]
+        (.verify delegate jwt-claims context)
+        (verify-additional-claims! (claims-map jwt-claims) context opts)))))
+
+(defn- mismatch-entry
+  [expected actual]
+  (first (remove (fn [[claim value]] (= value (get actual claim))) expected)))
+
+(defn- claims-verification-error
+  [^BadJWTException error ^JWTClaimsSet jwt-claims opts]
+  (let [cause (.getCause error)
+        claims (claims-map jwt-claims)
+        expected-aud (set (map str (or (some-> (:aud opts) audiences) [])))
+        actual-aud (set (:aud claims))
+        required (map claim-name (:required opts))
+        missing (first (remove #(.containsKey (.getClaims jwt-claims) %) required))
+        prohibited (first (filter #(.containsKey (.getClaims jwt-claims) %)
+                                  (map claim-name (:prohibited opts))))
+        expected (claims-map (claims-set (exact-claims opts) {}))
+        mismatch (mismatch-entry expected claims)]
+    (cond
+      (instance? clojure.lang.ExceptionInfo cause) cause
+      (instance? ExpiredJWTException error)
+      (jose-ex :expired "JWT is expired" error {:claim :exp})
+      (= "JWT before use time" (.getMessage error))
+      (jose-ex :not-yet-valid "JWT is not yet valid" error {:claim :nbf})
+      (and (contains? opts :aud) (empty? actual-aud))
+      (jose-ex :missing-claim "Missing required JWT claim" error {:claim :aud})
+      (and (seq expected-aud) (empty? (set/intersection expected-aud actual-aud)))
+      (jose-ex :claim-mismatch "JWT audience does not match" error
+               {:claim :aud :expected (:aud opts) :actual (:aud claims)})
+      missing
+      (jose-ex :missing-claim "Missing required JWT claim" error {:claim (claim-key missing)})
+      prohibited
+      (jose-ex :prohibited-claim "JWT contains a prohibited claim" error
+               {:claim (claim-key prohibited)})
+      mismatch
+      (let [[claim expected-value] mismatch]
+        (jose-ex :claim-mismatch "JWT claim does not match" error
+                 {:claim claim :expected expected-value :actual (get claims claim)}))
+      :else
+      (jose-ex :claim-verification-failure "JWT claims verification failed" error {}))))
+
+(defn verify-claims
+  "Verifies a claims map or Nimbus JWTClaimsSet and returns normalized claims.
+
+  The optional context is passed to :verifier."
+  ([claims opts]
+   (verify-claims claims nil opts))
+  ([claims context opts]
+   (let [jwt-claims (if (instance? JWTClaimsSet claims)
+                      claims
+                      (claims-set claims {}))]
+     (try
+       (.verify (claims-verifier opts)
+                jwt-claims
+                (if (or (nil? context) (instance? SecurityContext context))
+                  context
+                  (JWTContext. context)))
+       (claims-map jwt-claims)
+       (catch BadJWTException e
+         (throw (claims-verification-error e jwt-claims opts)))))))
 
 (defn- validated-claims
   [^JWTClaimsSet jwt-claims opts]
-  (let [claims (claims-map jwt-claims)]
-    (validate-claims! claims opts)
-    claims))
+  (verify-claims jwt-claims (select-keys opts claim-verification-options)))
+
+(defn- expected-values
+  [opts singular plural]
+  (when-not (or (contains? opts singular) (contains? opts plural))
+    (fail! :algorithm-unspecified
+           "Expected JWT algorithms are required"
+           {:option plural}))
+  (let [value (if (contains? opts plural) (get opts plural) (get opts singular))
+        values (if (or (sequential? value) (set? value)) value [value])]
+    (when (or (= :any value) (empty? values))
+      (invalid-option! plural))
+    values))
+
+(defn- jwe-algorithm
+  ^JWEAlgorithm [alg]
+  (let [name (cond
+               (instance? JWEAlgorithm alg) (str alg)
+               (keyword? alg) (if (= :dir alg) "dir" (str/upper-case (name alg)))
+               (string? alg) alg
+               :else (invalid-option! :jwe-algs))]
+    (when (str/starts-with? (str/upper-case name) "RSA1")
+      (invalid-option! :jwe-algs))
+    (JWEAlgorithm/parse ^String name)))
+
+(defn- encryption-method
+  ^EncryptionMethod [enc]
+  (let [name (cond
+               (instance? EncryptionMethod enc) (str enc)
+               (keyword? enc) (str/upper-case (name enc))
+               (string? enc) enc
+               :else (invalid-option! :jwe-encs))]
+    (when (str/includes? (str/upper-case name) "CBC+")
+      (invalid-option! :jwe-encs))
+    (EncryptionMethod/parse ^String name)))
+
+(defn- expected-jws-algorithms
+  ^Set [opts]
+  (let [algorithms (mapv algorithm (expected-values opts :jws-alg :jws-algs))]
+    (when (some #(= "none" (str/lower-case (str %))) algorithms)
+      (invalid-option! :jws-algs))
+    (HashSet. ^java.util.Collection algorithms)))
+
+(defn- expected-jwe-algorithms
+  [opts]
+  (set (map jwe-algorithm (expected-values opts :jwe-alg :jwe-algs))))
+
+(defn- expected-encryption-methods
+  [opts]
+  (set (map encryption-method (expected-values opts :jwe-enc :jwe-encs))))
+
+(defn- jwk-source
+  ^JWKSource [source]
+  (cond
+    (instance? JWKSource source) source
+    (instance? JWKSource (:jwk-source source)) (:jwk-source source)
+    :else (invalid-option! :source)))
+
+(defn- jwe-key-selector
+  ^JWEKeySelector [source allowed-algs allowed-encs]
+  (reify JWEKeySelector
+    (selectJWEKeys [_ header context]
+      (if (and (contains? allowed-algs (.getAlgorithm ^JWEHeader header))
+               (contains? allowed-encs (.getEncryptionMethod ^JWEHeader header)))
+        (.selectJWEKeys (JWEDecryptionKeySelector. (.getAlgorithm ^JWEHeader header)
+                                                  (.getEncryptionMethod ^JWEHeader header)
+                                                  source)
+                        header
+                        context)
+        (ArrayList.)))))
+
+(defn- type-verifier
+  ^DefaultJOSEObjectTypeVerifier [typ]
+  (let [types (HashSet.)]
+    (.add types (JOSEObjectType. (str typ)))
+    (DefaultJOSEObjectTypeVerifier. ^Set types)))
+
+(defn processor
+  "Builds a Nimbus ConfigurableJWTProcessor from a JWKS source and policy.
+
+  :jws-algs, :jwe-algs, and :jwe-encs are required allow-lists. Singular
+  :jws-alg, :jwe-alg, and :jwe-enc forms are also accepted. :typ optionally
+  requires an exact JOSE type on signed and encrypted layers. Plain JWTs are
+  always rejected. Claims policy options are passed to claims-verifier."
+  ^ConfigurableJWTProcessor [source opts]
+  (validate-options! processor-options opts)
+  (let [source (jwk-source source)
+        jws-algs (expected-jws-algorithms opts)
+        jwe-algs (expected-jwe-algorithms opts)
+        jwe-encs (expected-encryption-methods opts)
+        processor (DefaultJWTProcessor.)]
+    (.setJWSKeySelector processor (JWSVerificationKeySelector. jws-algs source))
+    (.setJWEKeySelector processor (jwe-key-selector source jwe-algs jwe-encs))
+    (.setJWTClaimsSetVerifier processor
+                             (claims-verifier (select-keys opts claim-verification-options)))
+    (when (contains? opts :typ)
+      (let [verifier (type-verifier (:typ opts))]
+        (.setJWSTypeVerifier processor verifier)
+        (.setJWETypeVerifier processor verifier)))
+    processor))
+
+(defn- validate-processor-header!
+  [compact opts]
+  (let [{:keys [type header]} (parse compact)]
+    (when (= :plain type)
+      (fail! :unsecured-jwt "Unsecured plain JWTs are rejected" {}))
+    (when (contains? opts :typ)
+      (when-not (= (str (:typ opts)) (:typ header))
+        (fail! :header-mismatch "JWT typ header does not match"
+               {:header :typ :expected (str (:typ opts)) :actual (:typ header)})))
+    (case type
+      :signed
+      (let [allowed (expected-jws-algorithms opts)
+            actual (algorithm (:alg header))]
+        (when-not (contains? allowed actual)
+          (fail! :algorithm-not-allowed "JWT algorithm is not allowed" {:alg (:alg header)})))
+
+      :encrypted
+      (let [allowed-algs (expected-jwe-algorithms opts)
+            allowed-encs (expected-encryption-methods opts)
+            actual-alg (jwe-algorithm (:alg header))
+            actual-enc (encryption-method (:enc header))]
+        (when-not (contains? allowed-algs actual-alg)
+          (fail! :algorithm-not-allowed "JWT algorithm is not allowed" {:alg (:alg header)}))
+        (when-not (contains? allowed-encs actual-enc)
+          (fail! :encryption-method-not-allowed
+                 "JWT encryption method is not allowed"
+                 {:enc (:enc header)})))
+      nil)))
+
+(defn- processor-claims-error
+  [^BadJWTException error]
+  (let [cause (.getCause error)
+        message (.getMessage error)]
+    (cond
+      (instance? clojure.lang.ExceptionInfo cause) cause
+      (instance? ExpiredJWTException error) (jose-ex :expired "JWT is expired" error {:claim :exp})
+      (= "JWT before use time" message) (jose-ex :not-yet-valid "JWT is not yet valid" error {:claim :nbf})
+      (str/includes? message "missing required") (jose-ex :missing-claim message error {})
+      (str/includes? message "prohibited") (jose-ex :prohibited-claim message error {})
+      (str/includes? message "claim") (jose-ex :claim-mismatch message error {})
+      (= "The payload is not a nested signed JWT" message)
+      (jose-ex :not-a-nested-jwt message error {})
+      :else (jose-ex :claim-verification-failure "JWT claims verification failed" error {}))))
+
+(defn process
+  "Processes a signed, encrypted, or nested compact JWT and returns claims.
+
+  The policy requires explicit JWS, JWE, and content-encryption allow-lists.
+  Plain JWTs and alg:none are always rejected. The optional context is passed
+  to the claims verifier."
+  ([source compact opts]
+   (process source compact nil opts))
+  ([source compact context opts]
+   (let [processor (processor source opts)
+         ^SecurityContext context (if (or (nil? context) (instance? SecurityContext context))
+                                    context
+                                    (JWTContext. context))]
+     (validate-processor-header! compact opts)
+     (try
+       (claims-map (.process ^ConfigurableJWTProcessor processor ^String compact context))
+       (catch BadJWTException e
+         (throw (processor-claims-error e)))
+       (catch BadJWSException e
+         (throw (jose-ex :invalid-signature "Invalid JWT signature" e {})))
+       (catch BadJWEException e
+         (throw (jose-ex :decryption-failure "Failed to decrypt JWT" e {})))
+       (catch BadJOSEException e
+         (let [message (.getMessage e)]
+           (throw (cond
+                    (str/includes? message "typ (type)")
+                    (jose-ex :header-mismatch "JWT typ header does not match" e {:header :typ})
+                    :else
+                    (jose-ex :key-not-found "No matching JWT key found" e {})))))
+       (catch ParseException e
+         (throw (jose-ex :parse-failure "Failed to parse JWT" e {})))
+       (catch JOSEException e
+         (throw (jose-ex :processing-failure "Failed to process JWT" e {})))))))
 
 (defn verify
   "Verifies a compact signed JWT and returns claims.

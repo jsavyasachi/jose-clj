@@ -4,6 +4,8 @@
             [jose.jwe :as jwe]
             [jose.jwk :as jwk])
   (:import (clojure.lang ExceptionInfo)
+           (com.nimbusds.jose.crypto DirectDecrypter DirectEncrypter)
+           (com.nimbusds.jose.jwk JWK OctetSequenceKey)
            (java.nio.charset StandardCharsets)))
 
 (def rfc-7516-rsa-jwk
@@ -144,6 +146,56 @@
              (jwe/header compact)))
       (is (= "hello" (:payload (jwe/decrypt key compact)))))))
 
+(deftest caller-supplied-providers
+  (let [^JWK key (jwk/generate :oct {:size 256})
+        oct (.toOctetSequenceKey key)
+        encrypter (DirectEncrypter. ^OctetSequenceKey oct)
+        decrypter (DirectDecrypter. ^OctetSequenceKey oct)
+        compact (jwe/encrypt encrypter "provider-backed" {:alg :dir :enc :a256gcm})]
+    (is (= "provider-backed" (:payload (jwe/decrypt decrypter compact))))))
+
+(deftest registered-header-options-round-trip
+  (let [key (jwk/generate :rsa)
+        public-jwk (jwk/public-jwk (jwk/generate :rsa {:kid "embedded"}))
+        compact (jwe/encrypt key "headers"
+                             {:alg :rsa-oaep-256
+                              :enc :a256gcm
+                              :jku "https://example.test/jwks.json"
+                              :jwk public-jwk
+                              :x5u "https://example.test/cert.pem"
+                              :x5c ["AQID"]
+                              :x5t "AQID"
+                              :x5t#S256 "BAUG"
+                              :typ "JOSE"
+                              :cty "text/plain"
+                              :crit #{"exp"}
+                              :zip :def
+                              :headers {:exp true}})
+        header (jwe/header compact)]
+    (is (= "https://example.test/jwks.json" (:jku header)))
+    (is (= "RSA" (get-in header [:jwk :kty])))
+    (is (not (contains? (:jwk header) :d)))
+    (is (= "https://example.test/cert.pem" (:x5u header)))
+    (is (= ["AQID"] (:x5c header)))
+    (is (= "AQID" (:x5t header)))
+    (is (= "BAUG" (:x5t#S256 header)))
+    (is (= "JOSE" (:typ header)))
+    (is (= "text/plain" (:cty header)))
+    (is (= ["exp"] (:crit header)))
+    (is (= :def (:zip header)))
+    (is (= true (:exp header))))
+  (let [key (jwk/generate :rsa)
+        compact (jwe/encrypt key (apply str (repeat 100 "compressible"))
+                             {:alg :rsa-oaep-256 :enc :a256gcm :zip :def})]
+    (is (= (apply str (repeat 100 "compressible"))
+           (:payload (jwe/decrypt key compact)))))
+  (let [key (jwk/generate :rsa)
+        private-jwk (jwk/generate :rsa)]
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwe/encrypt key "headers" {:jwk private-jwk})))))
+    (is (= :jwk
+           (:option (thrown-data #(jwe/encrypt key "headers" {:jwk private-jwk})))))))
+
 (deftest pbes2-round-trips
   (doseq [alg [:pbes2-hs256+a128kw
                :pbes2-hs384+a192kw
@@ -157,6 +209,19 @@
                                   :iteration-count 1000})]
         (is (= "password protected"
                (:payload (jwe/decrypt "correct horse battery staple" compact))))))))
+
+(deftest pbes2-json-round-trips
+  (doseq [serialization [:flattened :general]]
+    (testing serialization
+      (let [password "correct horse battery staple"
+            json (jwe/encrypt-json password "password protected"
+                                   {:serialization serialization
+                                    :alg :pbes2-hs256+a128kw
+                                    :enc :a256gcm
+                                    :salt-length 16
+                                    :iteration-count 1000})]
+        (is (= "password protected"
+               (:payload (jwe/decrypt-json password json))))))))
 
 (deftest ecdh-1pu-round-trips
   (let [sender (jwk/generate :ec {:curve :p-256 :kid "sender"})
@@ -180,6 +245,20 @@
              (:payload (jwe/decrypt {:sender (jwk/public-jwk sender)
                                      :recipient recipient}
                                     compact)))))))
+
+(deftest ecdh-1pu-json-round-trips
+  (let [sender (jwk/generate :ec {:curve :p-256 :kid "sender-json"})
+        recipient (jwk/generate :ec {:curve :p-256 :kid "recipient-json"})
+        encrypt-keys {:sender sender :recipient (jwk/public-jwk recipient)}
+        decrypt-keys {:sender (jwk/public-jwk sender) :recipient recipient}]
+    (doseq [serialization [:flattened :general]]
+      (testing serialization
+        (let [json (jwe/encrypt-json encrypt-keys "authenticated json"
+                                     {:serialization serialization
+                                      :alg :ecdh-1pu+a256kw
+                                      :enc :a256cbc-hs512})]
+          (is (= "authenticated json"
+                 (:payload (jwe/decrypt-json decrypt-keys json)))))))))
 
 (deftest xc20p-round-trip
   (let [key (jwk/generate :rsa {:kid "xc20p"})
