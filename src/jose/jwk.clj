@@ -11,6 +11,8 @@
                                        RSAKeyGenerator)
            (com.nimbusds.jose.util Base64 Base64URL)
            (java.net URI)
+           (java.security KeyStore KeyStoreException)
+           (java.security.cert X509Certificate)
            (java.text ParseException)
            (java.time Instant)
            (java.util ArrayList Date HashSet List Map Set)))
@@ -202,6 +204,35 @@
        (string? s-or-map) (JWK/parse ^String s-or-map)
        (map? s-or-map) (JWK/parse ^Map (stringify-json-value s-or-map))
        :else (throw (IllegalArgumentException. "Expected JWK, JSON string, or map"))))))
+
+(defn certificate->jwk
+  "Imports the public key and X.509 metadata from a certificate."
+  ^JWK [certificate]
+  (wrap-jose
+   :key-import-failure
+   "Failed to import X.509 certificate"
+   #(JWK/parse ^X509Certificate certificate)))
+
+(defn keystore->jwk
+  "Imports a key store entry by alias. The PIN may be a string, char array, or nil."
+  ^JWK [keystore alias pin]
+  (let [pin (cond
+              (nil? pin) nil
+              (string? pin) (.toCharArray ^String pin)
+              (= (class pin) (Class/forName "[C")) pin
+              :else (invalid-option! :pin))]
+    (try
+      (JWK/load ^KeyStore keystore (str alias) ^chars pin)
+      (catch KeyStoreException e
+        (throw (jose-ex :key-import-failure
+                        "Failed to import key store entry"
+                        e
+                        {:alias alias})))
+      (catch JOSEException e
+        (throw (jose-ex :key-import-failure
+                        "Failed to import key store entry"
+                        e
+                        {:alias alias}))))))
 
 (defn ->map
   "Returns the complete JWK JSON representation as a Clojure map."

@@ -3,7 +3,9 @@
             [jose.jwk :as jwk])
   (:import (com.nimbusds.jose JOSEException)
            (com.nimbusds.jose.jwk ECKey JWK KeyType OctetKeyPair RSAKey)
+           (com.nimbusds.jose.util X509CertUtils)
            (java.security PrivateKey PublicKey)
+           (java.security.cert CertificateException X509Certificate)
            (java.util Base64)))
 
 (set! *warn-on-reflection* true)
@@ -74,6 +76,16 @@
         (throw e))
       (catch RuntimeException e
         (parse-failure! "Failed to parse PEM" e)))))
+
+(defn pem->certificate
+  "Parses an X.509 certificate PEM string."
+  ^X509Certificate [pem]
+  (try
+    (X509CertUtils/parseWithException (str pem))
+    (catch CertificateException e
+      (parse-failure! "Failed to parse X.509 certificate PEM" e))
+    (catch RuntimeException e
+      (parse-failure! "Failed to parse X.509 certificate PEM" e))))
 
 (defn- wrap64
   [^String encoded]
