@@ -2,7 +2,9 @@
   (:require [clojure.test :refer [deftest is testing]]
             [jose.jwk :as jwk])
   (:import (clojure.lang ExceptionInfo)
-           (com.nimbusds.jose.jwk JWK JWKSet)))
+           (com.nimbusds.jose.jwk JWK JWKSet)
+           (java.time Instant)
+           (java.util Date)))
 
 ;; Test vector sourced from RFC 7638 section 3.1.
 (def rfc-7638-rsa-jwk
@@ -41,6 +43,38 @@
 (deftest generate-adds-kid-from-thumbprint-by-default
   (let [generated (jwk/generate :rsa {})]
     (is (= (jwk/thumbprint generated) (jwk/key-id generated)))))
+
+(deftest generate-round-trips-complete-metadata
+  (let [generated (jwk/generate :rsa
+                                {:kid "metadata"
+                                 :use :sig
+                                 :alg :rs256
+                                 :key-ops [:sign :verify]
+                                 :x5u "https://example.test/cert.pem"
+                                 :x5t "AQID"
+                                 :x5t#S256 "BAUG"
+                                 :iat (Instant/ofEpochSecond 100)
+                                 :nbf (Date. 200000)
+                                 :exp 300})
+        metadata (select-keys (jwk/->map generated)
+                              [:kid :use :alg :key_ops :x5u :x5t :x5t#S256
+                               :iat :nbf :exp])]
+    (is (= {:kid "metadata"
+            :use "sig"
+            :alg "RS256"
+            :key_ops ["sign" "verify"]
+            :x5u "https://example.test/cert.pem"
+            :x5t "AQID"
+            :x5t#S256 "BAUG"
+            :iat 100
+            :nbf 200
+            :exp 300}
+           metadata))))
+
+(deftest thumbprint-uri-is-rfc-9278-jkt-uri
+  (let [thumbprint (jwk/thumbprint rfc-7638-rsa-jwk)]
+    (is (= (str "urn:ietf:params:oauth:jwk-thumbprint:sha-256:" thumbprint)
+           (jwk/thumbprint-uri rfc-7638-rsa-jwk)))))
 
 (deftest conversion-and-public-views
   (let [rsa (jwk/generate :rsa {:kid "rsa-1"})

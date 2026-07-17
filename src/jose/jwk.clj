@@ -1,17 +1,24 @@
 (ns jose.jwk
   (:require [clojure.string :as str])
   (:import (com.nimbusds.jose Algorithm JOSEException)
-           (com.nimbusds.jose.jwk Curve JWK JWKSet KeyType KeyUse)
+           (com.nimbusds.jose.jwk Curve ECKey$Builder JWK JWKSet
+                                  KeyOperation KeyType KeyUse
+                                  OctetKeyPair$Builder OctetSequenceKey$Builder
+                                  RSAKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator JWKGenerator
                                        OctetKeyPairGenerator
                                        OctetSequenceKeyGenerator
                                        RSAKeyGenerator)
+           (com.nimbusds.jose.util Base64 Base64URL)
+           (java.net URI)
            (java.text ParseException)
-           (java.util ArrayList List Map)))
+           (java.time Instant)
+           (java.util ArrayList Date HashSet List Map Set)))
 
 (set! *warn-on-reflection* true)
 
-(def ^:private common-options #{:kid :use :alg})
+(def ^:private common-options
+  #{:kid :use :alg :key-ops :x5c :x5u :x5t :x5t#S256 :iat :nbf :exp})
 (def ^:private type-options
   {:rsa (conj common-options :size)
    :ec (conj common-options :curve)
@@ -106,15 +113,54 @@
     (string? c) (Curve/parse c)
     :else (invalid-option! :curve)))
 
+(defn- key-operation
+  ^KeyOperation [operation]
+  (case operation
+    :sign KeyOperation/SIGN
+    :verify KeyOperation/VERIFY
+    :encrypt KeyOperation/ENCRYPT
+    :decrypt KeyOperation/DECRYPT
+    :wrap-key KeyOperation/WRAP_KEY
+    :unwrap-key KeyOperation/UNWRAP_KEY
+    :derive-key KeyOperation/DERIVE_KEY
+    :derive-bits KeyOperation/DERIVE_BITS
+    (invalid-option! :key-ops)))
+
+(defn- java-set
+  ^Set [xs]
+  (let [result (HashSet.)]
+    (doseq [x xs]
+      (.add result x))
+    result))
+
+(defn- date
+  ^Date [option value]
+  (cond
+    (nil? value) nil
+    (instance? Date value) value
+    (instance? Instant value) (Date/from ^Instant value)
+    (integer? value) (Date. (* 1000 (long value)))
+    :else (invalid-option! option)))
+
 (defn- configure-generator!
   [^JWKGenerator generator opts]
   (let [use (key-use (:use opts))
         alg (algorithm (:alg opts))
-        kid (:kid opts)]
+        kid (:kid opts)
+        operations (when-let [operations (:key-ops opts)]
+                     (java-set (map key-operation operations)))]
     (when use
       (.keyUse generator use))
+    (when operations
+      (.keyOperations generator operations))
     (when alg
       (.algorithm generator alg))
+    (when (contains? opts :iat)
+      (.issueTime generator (date :iat (:iat opts))))
+    (when (contains? opts :nbf)
+      (.notBeforeTime generator (date :nbf (:nbf opts))))
+    (when (contains? opts :exp)
+      (.expirationTime generator (date :exp (:exp opts))))
     (if (contains? opts :kid)
       (.keyID generator kid)
       (.keyIDFromThumbprint generator true))
@@ -195,6 +241,16 @@
      (let [^JWK jwk (parse jwk)]
        (str (.computeThumbprint jwk))))))
 
+(defn thumbprint-uri
+  "Returns the RFC 9278 JWK thumbprint URI for the SHA-256 thumbprint."
+  [jwk]
+  (wrap-jose
+   :thumbprint-failure
+   "Failed to compute JWK thumbprint URI"
+   (fn []
+     (let [^JWK jwk (parse jwk)]
+       (str (.computeThumbprintURI jwk))))))
+
 (defn key-type
   [jwk]
   (let [^JWK jwk (parse jwk)
@@ -216,6 +272,64 @@
   (let [^JWK jwk (parse jwk)]
     (.isPrivate jwk)))
 
+(defn- set-rsa-x509!
+  [^RSAKey$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (.build builder))
+
+(defn- set-ec-x509!
+  [^ECKey$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (.build builder))
+
+(defn- set-oct-x509!
+  [^OctetSequenceKey$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (.build builder))
+
+(defn- set-okp-x509!
+  [^OctetKeyPair$Builder builder opts]
+  (when (contains? opts :x5u)
+    (.x509CertURL builder (some-> (:x5u opts) str URI.)))
+  (when (contains? opts :x5t)
+    (.x509CertThumbprint builder (some-> (:x5t opts) str Base64URL.)))
+  (when (contains? opts :x5t#S256)
+    (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
+  (when (contains? opts :x5c)
+    (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (.build builder))
+
+(defn- configure-x509
+  ^JWK [^JWK generated opts]
+  (if-not (some #(contains? opts %) [:x5c :x5u :x5t :x5t#S256])
+    generated
+    (case (key-type generated)
+      :rsa (set-rsa-x509! (RSAKey$Builder. (.toRSAKey generated)) opts)
+      :ec (set-ec-x509! (ECKey$Builder. (.toECKey generated)) opts)
+      :oct (set-oct-x509! (OctetSequenceKey$Builder. (.toOctetSequenceKey generated)) opts)
+      :okp (set-okp-x509! (OctetKeyPair$Builder. (.toOctetKeyPair generated)) opts))))
+
 (defn generate
   "Generates a Nimbus JWK. Kind is one of :rsa, :ec, :okp, or :oct."
   (^JWK [kind]
@@ -230,16 +344,16 @@
         :rsa (let [^RSAKeyGenerator generator
                    (RSAKeyGenerator. (long (:size opts 2048)))]
                (configure-generator! generator opts)
-               (.generate generator))
+               (configure-x509 (.generate generator) opts))
         :ec (let [^ECKeyGenerator generator
                   (ECKeyGenerator. (curve (:curve opts :p-256)))]
               (configure-generator! generator opts)
-              (.generate generator))
+              (configure-x509 (.generate generator) opts))
         :okp (try
                (let [^OctetKeyPairGenerator generator
                      (OctetKeyPairGenerator. (curve (:curve opts :ed25519)))]
                  (configure-generator! generator opts)
-                 (.generate generator))
+                 (configure-x509 (.generate generator) opts))
                (catch NoClassDefFoundError e
                  (throw (jose-ex :missing-optional-dep
                                  "Missing optional Tink dependency"
@@ -248,7 +362,7 @@
         :oct (let [^OctetSequenceKeyGenerator generator
                    (OctetSequenceKeyGenerator. (long (:size opts 256)))]
                (configure-generator! generator opts)
-               (.generate generator)))))))
+               (configure-x509 (.generate generator) opts)))))))
 
 (defn jwk-set
   ^JWKSet [jwks]
