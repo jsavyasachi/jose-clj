@@ -59,10 +59,12 @@
                                  :x5t#S256 "BAUG"
                                  :iat (Instant/ofEpochSecond 100)
                                  :nbf (Date. 200000)
-                                 :exp 300})
+                                 :exp 300
+                                 :revoked {:at 400 :reason :compromised}})
         generated-map (jwk/->map generated)
         metadata (select-keys generated-map
-                              [:kid :use :alg :x5u :x5t :x5t#S256 :iat :nbf :exp])]
+                              [:kid :use :alg :x5u :x5t :x5t#S256
+                               :iat :nbf :exp :revoked])]
     (is (= {:kid "metadata"
             :use "sig"
             :alg "RS256"
@@ -71,7 +73,8 @@
             :x5t#S256 "BAUG"
             :iat 100
             :nbf 200
-            :exp 300}
+            :exp 300
+            :revoked {:revoked_at 400 :reason "compromised"}}
            metadata))
     (is (= #{"sign" "verify"} (set (:key_ops generated-map))))))
 

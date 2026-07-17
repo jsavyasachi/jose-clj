@@ -2,7 +2,8 @@
   (:require [clojure.string :as str])
   (:import (com.nimbusds.jose Algorithm JOSEException)
            (com.nimbusds.jose.jwk Curve ECKey$Builder JWK JWKMatcher JWKSet
-                                  KeyOperation KeyType KeyUse
+                                  KeyOperation KeyRevocation KeyRevocation$Reason
+                                  KeyType KeyUse
                                   OctetKeyPair$Builder OctetSequenceKey$Builder
                                   RSAKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator JWKGenerator
@@ -21,7 +22,8 @@
 (set! *warn-on-reflection* true)
 
 (def ^:private common-options
-  #{:kid :use :alg :key-ops :x5c :x5u :x5t :x5t#S256 :iat :nbf :exp})
+  #{:kid :use :alg :key-ops :x5c :x5u :x5t :x5t#S256
+    :iat :nbf :exp :revoked})
 (def ^:private type-options
   {:rsa (conj common-options :size)
    :ec (conj common-options :curve)
@@ -144,6 +146,20 @@
     (instance? Instant value) (Date/from ^Instant value)
     (integer? value) (Date. (* 1000 (long value)))
     :else (invalid-option! option)))
+
+(defn- key-revocation
+  ^KeyRevocation [value]
+  (cond
+    (instance? KeyRevocation value) value
+    (map? value)
+    (let [reason (:reason value)
+          reason (cond
+                   (instance? KeyRevocation$Reason reason) reason
+                   (keyword? reason) (KeyRevocation$Reason/parse (name reason))
+                   (string? reason) (KeyRevocation$Reason/parse reason)
+                   :else (invalid-option! :revoked))]
+      (KeyRevocation. (date :revoked (:at value)) reason))
+    :else (invalid-option! :revoked)))
 
 (defn- configure-generator!
   [^JWKGenerator generator opts]
@@ -314,6 +330,8 @@
     (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
   (when (contains? opts :x5c)
     (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
   (.build builder))
 
 (defn- set-ec-x509!
@@ -326,6 +344,8 @@
     (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
   (when (contains? opts :x5c)
     (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
   (.build builder))
 
 (defn- set-oct-x509!
@@ -338,6 +358,8 @@
     (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
   (when (contains? opts :x5c)
     (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
   (.build builder))
 
 (defn- set-okp-x509!
@@ -350,11 +372,13 @@
     (.x509CertSHA256Thumbprint builder (some-> (:x5t#S256 opts) str Base64URL.)))
   (when (contains? opts :x5c)
     (.x509CertChain builder (java-list (map #(Base64. (str %)) (:x5c opts)))))
+  (when (contains? opts :revoked)
+    (.keyRevocation builder (key-revocation (:revoked opts))))
   (.build builder))
 
-(defn- configure-x509
+(defn- configure-metadata
   ^JWK [^JWK generated opts]
-  (if-not (some #(contains? opts %) [:x5c :x5u :x5t :x5t#S256])
+  (if-not (some #(contains? opts %) [:x5c :x5u :x5t :x5t#S256 :revoked])
     generated
     (case (key-type generated)
       :rsa (set-rsa-x509! (RSAKey$Builder. (.toRSAKey generated)) opts)
@@ -376,16 +400,16 @@
         :rsa (let [^RSAKeyGenerator generator
                    (RSAKeyGenerator. (long (:size opts 2048)))]
                (configure-generator! generator opts)
-               (configure-x509 (.generate generator) opts))
+               (configure-metadata (.generate generator) opts))
         :ec (let [^ECKeyGenerator generator
                   (ECKeyGenerator. (curve (:curve opts :p-256)))]
               (configure-generator! generator opts)
-              (configure-x509 (.generate generator) opts))
+              (configure-metadata (.generate generator) opts))
         :okp (try
                (let [^OctetKeyPairGenerator generator
                      (OctetKeyPairGenerator. (curve (:curve opts :ed25519)))]
                  (configure-generator! generator opts)
-                 (configure-x509 (.generate generator) opts))
+                 (configure-metadata (.generate generator) opts))
                (catch NoClassDefFoundError e
                  (throw (jose-ex :missing-optional-dep
                                  "Missing optional Tink dependency"
@@ -394,7 +418,7 @@
         :oct (let [^OctetSequenceKeyGenerator generator
                    (OctetSequenceKeyGenerator. (long (:size opts 256)))]
                (configure-generator! generator opts)
-               (configure-x509 (.generate generator) opts)))))))
+               (configure-metadata (.generate generator) opts)))))))
 
 (defn jwk-set
   (^JWKSet [jwks]
