@@ -7,6 +7,7 @@
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jwt JWTClaimsSet$Builder PlainJWT)
+           (com.nimbusds.jwt.proc JWTClaimsSetVerifier)
            (java.time Instant)))
 
 (defn thrown
@@ -104,6 +105,38 @@
     (is (= :missing-claim (:jose/error (thrown-data #(jwt/verify key no-sub {:algs #{:hs256} :required [:sub]})))))
     (is (= :sub (:claim (thrown-data #(jwt/verify key no-sub {:algs #{:hs256} :required [:sub]})))))
     (is (= "subject" (:sub (jwt/verify key skewed {:algs #{:hs256} :clock-skew 60}))))))
+
+(deftest richer-claims-verification
+  (let [claims {:iss "issuer"
+                :aud ["api" "mobile"]
+                :exp 2051222400
+                "role" "admin"}
+        context {:request-id "request-1"}
+        seen (atom nil)]
+    (is (instance? JWTClaimsSetVerifier (jwt/claims-verifier {:aud ["api"]})))
+    (is (= "admin"
+           (get (jwt/verify-claims claims
+                                   context
+                                   {:exact {:iss "issuer" "role" "admin"}
+                                    :aud ["web" "mobile"]
+                                    :required [:iss "role"]
+                                    :prohibited [:jti]
+                                    :verifier (fn [verified-claims verifier-context]
+                                                (reset! seen [verified-claims verifier-context])
+                                                true)})
+                "role")))
+    (is (= context (second @seen)))
+    (is (= :claim-mismatch
+           (:jose/error (thrown-data #(jwt/verify-claims claims {:exact {"role" "user"}})))))
+    (is (= :aud
+           (:claim (thrown-data #(jwt/verify-claims claims {:aud ["web" "service"]})))))
+    (is (= :prohibited-claim
+           (:jose/error (thrown-data #(jwt/verify-claims claims {:prohibited ["role"]})))))
+    (is (= "role"
+           (:claim (thrown-data #(jwt/verify-claims claims {:prohibited ["role"]})))))
+    (is (= :claim-verification-failure
+           (:jose/error (thrown-data #(jwt/verify-claims claims
+                                                        {:verifier (constantly false)})))))))
 
 (deftest verify-with-jwks-selects-key-and-validates-claims
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
