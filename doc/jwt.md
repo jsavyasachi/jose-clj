@@ -69,8 +69,8 @@ JWT claim validation error keywords:
 | `:missing-claim` | A claim listed in `:required` is absent. |
 | `:invalid-signature` | The compact JWT signature does not verify with the supplied key. |
 
-`jwt/claims` parses a compact signed JWT and returns its claims without verifying
-the signature:
+`jwt/claims` parses a compact signed JWT and returns its claims. It does not
+verify the signature:
 
 ```clojure
 (jwt/claims token)
@@ -96,15 +96,15 @@ vector.
 ;; => decrypted and validated claims map
 ```
 
-`jwt/encrypt` accepts the JWE options `:alg`, `:enc`, `:kid`, and `:headers`,
-plus the JWT time options `:expires-in` and `:now-iat?`.
+`jwt/encrypt` accepts the JWE options `:alg`, `:enc`, `:kid`, and `:headers`.
+It also accepts the JWT time options `:expires-in` and `:now-iat?`.
 
 `jwt/decrypt` decrypts the JWE payload and validates claims with the same verify
 options as `jwt/verify`: `:iss`, `:aud`, `:clock-skew`, and `:required`.
 
 ## Nested JWTs
 
-Nested JWTs are signed first, then encrypted. The encrypted JWE carries
+jose-clj signs a nested JWT first, then encrypts it. The encrypted JWE carries
 `{:cty "JWT"}` in its headers.
 
 ```clojure
@@ -127,5 +127,5 @@ Nested JWTs are signed first, then encrypted. The encrypted JWE carries
 ```
 
 `jwt/decrypt-then-verify` throws `ex-info` with
-`{:jose/error :not-a-nested-jwt}` when the decrypted JWE payload is not a compact
+`{:jose/error :not-a-nested-jwt}` if the decrypted JWE payload is not a compact
 signed JWT.

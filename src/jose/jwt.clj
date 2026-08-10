@@ -129,7 +129,7 @@
 (defn parse
   "Inspects a compact JWT and returns its type and unverified header.
 
-  This only parses attacker-controlled data. It does not verify a signature,
+  This parses only attacker-controlled data. It does not verify a signature,
   decrypt content, validate claims, or establish trust."
   [compact]
   (let [jwt (parsed-jwt compact)]
@@ -415,11 +415,10 @@
 (defn claims-verifier
   "Returns a Nimbus JWTClaimsSetVerifier for a Clojure claims policy.
 
-  :exact requires exact claim values. :aud accepts one audience or a collection
-  where any match is accepted. :prohibited rejects named claims. :verifier is
-  called with the normalized claims map and processor security context and must
-  return truthy. Existing :iss, :required, :clock-skew, and :max-age options are
-  also supported."
+  :exact requires exact claim values. :aud accepts one audience or a collection.
+  It accepts any match. :prohibited rejects named claims. :verifier is called
+  with the normalized claims map and processor security context. It must return
+  truthy. It also supports :iss, :required, :clock-skew, and :max-age."
   ^JWTClaimsSetVerifier [opts]
   (validate-options! claim-verification-options opts)
   (when (and (contains? opts :verifier) (not (ifn? (:verifier opts))))

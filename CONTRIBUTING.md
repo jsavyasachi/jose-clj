@@ -1,17 +1,16 @@
 # Contributing to jose-clj
 
-Thanks for your interest in improving `jose-clj`. Bug reports, fixes, and
-focused feature contributions are all welcome.
+Send bug reports, fixes, and focused feature contributions for `jose-clj`.
 
 ## Before you start
 
-- For anything beyond a trivial fix, **open an issue first** so we can agree on
+- For work beyond a trivial fix, **open an issue first**. This lets us agree on
   the approach before you invest time.
 - Check existing issues and pull requests to avoid duplicate work.
 
 ## Project layout
 
-A single `deps.edn` library, one namespace: `vector-search.core` - the
+A `deps.edn` library with one namespace: `vector-search.core` - the
 embedded HNSW index API (`index`, `add!`, `search`, `remove!`, `get-item`,
 `size`, `save` / `load-index`) over hnswlib-core.
 
@@ -29,16 +28,16 @@ clojure -M:1.12:test       # Clojure 1.12 matrix cell
 clojure -T:build jar       # build a jar
 ```
 
-The whole suite is deterministic and self-contained (seeded RNG for the
-recall smoke test); there is nothing to download.
+The full suite is deterministic and self-contained. It uses a seeded RNG for
+the recall smoke test. There is nothing to download.
 
-The bar for a mergeable change:
+Requirements for a mergeable change:
 
 - **Tests first.** Add or update tests for the behavior you change; for a bug
   fix, include a regression test that fails before your fix and passes after.
 - **Green build.** `clojure -M:test` passes and `src` compiles with **zero**
   reflection warnings (`*warn-on-reflection*` is on).
-- **No scope creep.** Keep each pull request to one logical change.
+- **One scope.** Keep each pull request to one logical change.
 
 ## Commits and pull requests
 

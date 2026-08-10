@@ -281,9 +281,9 @@
 (defn remote-source
   "Returns an opaque remote JWKS source.
 
-  Without options, Nimbus defaults are used. Options configure caching,
-  refresh-ahead, retry, failover, outage tolerance, rate limiting, and event
-  or health listeners."
+  Without options, Nimbus uses its defaults. Options configure caching,
+  refresh-ahead, retry, failover, outage tolerance, rate limits, and event or
+  health listeners."
   (^Source [jwks-url]
    (remote-source jwks-url {}))
   (^Source [jwks-url opts]

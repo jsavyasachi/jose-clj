@@ -1,7 +1,7 @@
 # Verifying with Remote JWKS
 
-`jose.jwks` wraps Nimbus key sources. A source can be remote and cached, or local
-and in-memory.
+`jose.jwks` wraps Nimbus key sources. A source can be remote and cached. It can
+also be local and in-memory.
 
 ```clojure
 (require '[jose.jwk :as jwk]
@@ -32,11 +32,11 @@ Options:
 | `:read-timeout-ms` | HTTP read timeout in milliseconds. |
 | `:rate-limit-ms` | Minimum interval for Nimbus rate limiting. |
 
-All options are optional. Without options, Nimbus defaults are used. The remote
-source built by Nimbus already caches keys.
+All options are optional. Without options, Nimbus uses its defaults. The remote
+source from Nimbus already caches keys.
 
-Invalid URLs throw `ex-info` with `{:jose/error :invalid-url}`. Remote retrieval
-failures from `jwks/get-keys` throw `{:jose/error :key-source-failure}`.
+Invalid URLs throw `ex-info` with `{:jose/error :invalid-url}`. `jwks/get-keys`
+throws `{:jose/error :key-source-failure}` for a remote retrieval failure.
 
 ## Local sources
 
@@ -48,8 +48,8 @@ failures from `jwks/get-keys` throw `{:jose/error :key-source-failure}`.
   (jwks/local-source [(jwk/public-jwk rsa-key)]))
 ```
 
-`jwks/local-source` accepts a vector of JWKs or a JWK set value accepted by
-`jwk/parse-set`.
+`jwks/local-source` accepts a vector of JWKs. It also accepts a JWK set value
+accepted by `jwk/parse-set`.
 
 ## Selecting keys
 
@@ -89,8 +89,8 @@ for a key ID, or `nil`.
 ;; => verified claims map
 ```
 
-`jws/verify-with-jwks` and `jwt/verify-with-jwks` select a key with the compact
-object header `kid` and `alg`, then call the normal verifier.
+`jws/verify-with-jwks` and `jwt/verify-with-jwks` select a key from the compact
+object header `kid` and `alg`. They then call the normal verifier.
 
 Key selection errors:
 
@@ -99,25 +99,24 @@ Key selection errors:
 | `:key-not-found` | No key matches the header `kid` and `alg`. |
 | `:ambiguous-key` | The compact object has no `kid` and more than one key matches `alg`. |
 
-The verifier is chosen by the selected JWK key type, not by trusting the compact
-object algorithm alone. An HS256 forgery over an RSA public key is rejected
-because the selected RSA JWK is verified with an RSA verifier, not a MAC
-verifier.
+jose-clj chooses the verifier from the selected JWK key type. It does not trust
+the algorithm in the compact object. An HS256 forgery over an RSA public key is
+rejected because the selected RSA JWK is verified with an RSA verifier, not a
+MAC verifier.
 
 ## Integration tests
 
-The repository includes a `^:integration` test that reads Google's certificate
+The repository includes a `^:integration` test that reads the Google certificate
 JWKS:
 
 ```clojure
 (jwks/remote-source "https://www.googleapis.com/oauth2/v3/certs")
 ```
 
-It is skipped by default through `tests.edn`:
+Kaocha skips it by default through `tests.edn`:
 
 ```clojure
 :skip-meta [:integration]
 ```
 
-Use remote-source examples as illustrative unless the test environment allows
-network access.
+Use remote-source examples only when the test environment has network access.

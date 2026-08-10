@@ -6,7 +6,7 @@
 
 Idiomatic Clojure JOSE - JWS, JWE, JWK/JWKS, and JWT (signed, encrypted, and
 nested) - over [Nimbus JOSE+JWT](https://connect2id.com/products/nimbus-jose-jwt),
-the canonical Java JOSE implementation. Maps in, maps out.
+the canonical Java JOSE implementation. It takes maps and returns maps.
 
 ## Stack
 
@@ -18,14 +18,14 @@ the canonical Java JOSE implementation. Maps in, maps out.
 
 ## Why
 
-Clojure's JOSE story is partial. buddy-sign covers JWS and signed JWTs well but
-its JWE support is limited and it has been dormant since 2024; other libraries do
-JWT validation or remote JWKS fetching but not encryption or key generation. There
-was no single, idiomatic library covering the whole of JOSE - in particular full
-JWE, the JWK lifecycle (generate, thumbprint, sets), cached remote JWKS, and
-modern algorithms (EdDSA, ECDH-ES). jose-clj wraps the maintained, complete Nimbus
-engine rather than reimplementing any crypto, so the primitives are as correct as
-Nimbus and stay correct as it is updated.
+Clojure has only partial JOSE support. buddy-sign covers JWS and signed JWTs
+well, but its JWE support is limited and it has been inactive since 2024. Other
+libraries do JWT validation or remote JWKS retrieval, but not encryption or key
+generation. No single library covered the whole of JOSE: full JWE, the JWK
+lifecycle (generate, thumbprint, sets), cached remote JWKS, and modern
+algorithms (EdDSA, ECDH-ES). jose-clj wraps the maintained Nimbus engine rather
+than reimplementing cryptography. The cryptographic primitives are as correct as
+Nimbus, and they stay correct as Nimbus is updated.
 
 ## Installation
 
@@ -41,16 +41,19 @@ Leiningen:
 [net.clojars.savya/jose-clj "0.5.0"]
 ```
 
-Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. Because jose-clj is a thin wrapper,
-Nimbus updates (including security fixes) are picked up by bumping that one
-dependency; the weekly antq workflow proposes bumps automatically.
+Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. jose-clj is a thin wrapper, so you
+get Nimbus updates, including security fixes, when you bump that one dependency.
+The weekly antq workflow proposes bumps automatically.
 
-JDK 11+. Some paths need optional engines on the classpath: EdDSA/Ed25519
-requires `com.google.crypto.tink/tink`, ES256K (secp256k1) requires
-BouncyCastle (`org.bouncycastle/bcprov-jdk18on`), and PEM parsing requires
-`org.bouncycastle/bcpkix-jdk18on`. Everything else runs on the plain JDK. If you
-call one of these paths without the engine present, the error is
-`{:jose/error :missing-optional-dep}` rather than a `NoClassDefFoundError`.
+JDK 11+. Some paths need an optional engine on the classpath:
+
+- EdDSA/Ed25519 needs `com.google.crypto.tink/tink`.
+- ES256K (secp256k1) needs BouncyCastle (`org.bouncycastle/bcprov-jdk18on`).
+- PEM parsing needs `org.bouncycastle/bcpkix-jdk18on`.
+
+Everything else runs on the plain JDK. If you call one of these paths without
+the engine, the error is `{:jose/error :missing-optional-dep}` and not a
+`NoClassDefFoundError`.
 
 ## Usage
 
@@ -108,11 +111,11 @@ call one of these paths without the engine present, the error is
 (pem/pem->jwk public-pem)  ; => public JWK map
 ```
 
-`pem->jwk` accepts PEM public keys, private keys, and X.509 certificates. PEM
-parsing is a Nimbus path backed by BouncyCastle PKIX, so add
-`org.bouncycastle/bcpkix-jdk18on` at runtime when parsing PEM. EC private-key
-export includes the matching public PEM block so Nimbus can reconstruct the full
-EC JWK from PKCS#8 private material.
+`pem->jwk` accepts PEM public keys, private keys, and X.509 certificates. Nimbus
+uses BouncyCastle PKIX to parse PEM. Add
+`org.bouncycastle/bcpkix-jdk18on` at runtime when you parse PEM. EC private-key
+export includes the matching public PEM block, so Nimbus can rebuild the full EC
+JWK from PKCS#8 private material.
 
 ### Signing (`jose.jws`)
 
@@ -138,9 +141,9 @@ EC JWK from PKCS#8 private material.
 ```
 
 `:detached? true` serializes compact JWS as `header..signature`.
-`:b64? false` sets RFC 7797 `b64:false` and marks `b64` critical. Attached
-compact unencoded payloads cannot contain `.` because `.` is the compact JWS
-delimiter; use detached unencoded JWS for arbitrary payload bytes.
+`:b64? false` sets RFC 7797 `b64:false` and marks `b64` critical. An attached
+compact unencoded payload cannot contain `.`, because `.` is the compact JWS
+delimiter. Use detached unencoded JWS for arbitrary payload bytes.
 
 ### Encryption (`jose.jwe`)
 
@@ -148,8 +151,8 @@ Full algorithm matrix: `:rsa-oaep-256/384/512`, `:ecdh-es` and `:ecdh-1pu`
 (each with `+a128/192/256kw` variants), `:pbes2-hs256+a128kw`,
 `:pbes2-hs384+a192kw`, `:pbes2-hs512+a256kw`, `:a128/192/256kw`,
 `:a128/192/256gcmkw`, and `:dir`; encryption methods
-`:a128/192/256cbc-hs256/384/512`, `:a128/192/256gcm`, and `:xc20p`. The insecure
-RSA1_5 is deliberately not offered.
+`:a128/192/256cbc-hs256/384/512`, `:a128/192/256gcm`, and `:xc20p`. jose-clj
+does not offer insecure RSA1_5.
 
 ```clojure
 (jwe/encrypt k "payload" {:alg :rsa-oaep-256 :enc :a256gcm})
@@ -237,15 +240,16 @@ places key-management data on each recipient.
 (keyring/public-jwks-json rotated)  ; publication-ready JWKS JSON
 ```
 
-The immutable key ring keeps active signing and encryption keys while retained
-keys continue to verify or decrypt older messages. Published JWKS contain only
-public key material: private parameters are stripped and symmetric keys are
-omitted.
+The immutable key ring keeps the active signing and encryption keys. Retained
+keys continue to verify or decrypt older messages. A published JWKS contains
+only public key material: jose-clj removes private parameters and omits
+symmetric keys.
 
 ## Errors
 
-Bad input never NPEs. API and parse failures normalize to `ex-info` with a
-`:jose/error` key and the original exception as the cause:
+Bad input does not cause a `NullPointerException`. API and parse failures
+normalize to `ex-info` with a `:jose/error` key and the original exception as
+the cause:
 
 | `:jose/error` | when |
 |---|---|

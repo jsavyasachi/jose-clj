@@ -16,7 +16,7 @@
        " \"exp\":1300819380,\r\n"
        " \"http://example.com/is_root\":true}"))
 
-;; Test vector sourced from RFC 7515 appendix A.1.
+;; This test vector is from RFC 7515 appendix A.1.
 (def rfc-7515-a1-oct-jwk
   {:kty "oct"
    :k "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow"})
@@ -26,7 +26,7 @@
        "eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ."
        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"))
 
-;; Test vector sourced from RFC 7515 appendix A.2.
+;; This test vector is from RFC 7515 appendix A.2.
 (def rfc-7515-a2-rsa-jwk
   {:kty "RSA"
    :n "ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddxHmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT-SFd2lZS-pCgNMsD1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSHSXndS5z5rexMdbBYUsLA9e-KXBdQOS-UTo7WTBEMa2R2CapHg665xsmtdVMTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8NAco9_h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ"
@@ -48,7 +48,7 @@
        "hJ1phCnvWh6IeYI2w9QOYEUipUTI8np6LbgGY9Fs98rqVt5AXLIhWkWywlVmtVrB"
        "p0igcN_IoypGlUPQGe77Rw"))
 
-;; Test vector sourced from RFC 7515 appendix A.3.
+;; This test vector is from RFC 7515 appendix A.3.
 (def rfc-7515-a3-ec-jwk
   {:kty "EC"
    :crv "P-256"
@@ -62,7 +62,7 @@
        "DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSA"
        "pmWQxfKTUJqPP3-Kg6NU1Q"))
 
-;; Test vector sourced from RFC 8037 appendix A.4.
+;; This test vector is from RFC 8037 appendix A.4.
 (def rfc-8037-a4-ed25519-jwk
   {:kty "OKP"
    :crv "Ed25519"
@@ -254,11 +254,11 @@
                                                             {:algs #{:rs256}})))))))
 
 (deftest alg-confusion-attack-is-rejected
-  ;; A JWKS serves only an RSA public key, with no "alg" param (as many real
-  ;; endpoints do). An attacker forges an HS256 token using the RSA public key
-  ;; material as the HMAC secret and sets the kid to match. Because the verifier
-  ;; is chosen from the key type (RSA -> RSASSAVerifier), never from the token's
-  ;; header alg, the forgery must not be accepted.
+  ;; A JWKS serves only an RSA public key with no "alg" param. Many endpoints
+  ;; do this. An attacker forges an HS256 token with the RSA public key material
+  ;; as the HMAC secret. The attacker sets the kid to match. The verifier uses
+  ;; the key type (RSA -> RSASSAVerifier), never the token header alg. It must
+  ;; reject the forgery.
   (let [rsa (jwk/generate :rsa {:kid "a" :use :sig})
         pub (jwk/public-jwk rsa)
         source (jwks/local-source [pub])
@@ -272,8 +272,8 @@
                                                                     {:algs #{:rs256}})))))))
 
 (deftest unsecured-alg-none-token-is-rejected
-  ;; The classic "alg":"none" forgery: a header of {"alg":"none"} with an empty
-  ;; signature. It must never verify against a real key.
+  ;; This "alg":"none" forgery has a {"alg":"none"} header and an empty
+  ;; signature. It must never verify with a real key.
   (let [b64 (fn [^String s]
               (-> (java.util.Base64/getUrlEncoder)
                   (.withoutPadding)

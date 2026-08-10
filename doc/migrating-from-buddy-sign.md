@@ -1,10 +1,11 @@
 # Migrating from buddy-sign
 
-buddy-sign is solid for JWS and signed JWT use cases and remains fine for those.
-jose-clj is useful when a project needs full JWE support, a JWK lifecycle,
-cached remote JWKS verification, or modern algorithms such as EdDSA and ECDH-ES.
+buddy-sign covers JWS and signed JWT use cases well, and it is still sufficient
+for them. jose-clj is useful when a project needs full JWE support, a JWK
+lifecycle, cached remote JWKS verification, or modern algorithms such as EdDSA
+and ECDH-ES.
 
-Factually, buddy-sign has been dormant since 2024.
+buddy-sign has been inactive since 2024.
 
 ## Function mapping
 
@@ -23,8 +24,8 @@ Factually, buddy-sign has been dormant since 2024.
 
 ## JWKs instead of raw Java keys
 
-buddy-based code often passes raw `java.security` keys from buddy-core key
-loading helpers. jose-clj APIs take JWK input:
+buddy-based code often passes raw `java.security` keys from the buddy-core
+helpers for key loading. jose-clj APIs take JWK input:
 
 ```clojure
 (require '[jose.jwk :as jwk]
@@ -39,14 +40,14 @@ loading helpers. jose-clj APIs take JWK input:
 (jwt/verify key token {:required [:sub]})
 ```
 
-`jwk/parse` accepts JWK JSON strings, Clojure maps, or Nimbus JWK values. `jwk/->json`
-and `jwk/->map` serialize keys. `jwk/public-jwk` returns the public form for
-asymmetric keys and `nil` for `:oct`.
+`jwk/parse` accepts JWK JSON strings, Clojure maps, or Nimbus JWK values.
+`jwk/->json` and `jwk/->map` serialize keys. `jwk/public-jwk` returns the public
+form for asymmetric keys and `nil` for `:oct`.
 
 ## Options
 
-buddy-sign APIs commonly use raw Java keys and option maps around the chosen
-operation. jose-clj uses JWKs plus keyword algorithm names.
+buddy-sign APIs commonly use raw Java keys and option maps for the operation.
+jose-clj uses JWKs plus keyword algorithm names.
 
 Examples:
 
@@ -62,8 +63,8 @@ Examples:
 
 ## Claim validation
 
-buddy-sign signed JWT flows usually combine signing or unsigning with claims such
-as expiration, not-before, audience, and issuer. In jose-clj:
+Flows in buddy-sign usually combine signing or unsigning with claims such as
+expiration, not-before, audience, and issuer. In jose-clj:
 
 | Claim behavior | jose-clj API |
 |---|---|

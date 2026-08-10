@@ -1,7 +1,7 @@
 # Keys and JWK Sets
 
-`jose.jwk` is JWK-centric. Functions accept Nimbus JWK values directly, JWK JSON
-strings, or Clojure maps where documented.
+`jose.jwk` is JWK-centric. Functions accept Nimbus JWK values directly. They
+also accept JWK JSON strings or Clojure maps where documented.
 
 ```clojure
 (require '[jose.jwk :as jwk])
@@ -35,7 +35,7 @@ Common options:
 
 | Option | Values |
 |---|---|
-| `:kid` | Key ID string, or `nil`. If omitted, jose-clj asks Nimbus to derive one from the thumbprint. |
+| `:kid` | Key ID string, or `nil`. If you omit it, jose-clj asks Nimbus to derive one from the thumbprint. |
 | `:use` | `:sig` or `:enc`. |
 | `:alg` | Keyword, string, or Nimbus `Algorithm`. Common keywords include `:rs256`, `:ps256`, `:es256`, `:es256k`, `:eddsa`, `:a128kw`, `:a192kw`, `:a256kw`, and `:dir`. |
 
@@ -46,9 +46,9 @@ Curve keywords:
 | `:ec` | `:p-256`, `:p-384`, `:p-521`, `:secp256k1` |
 | `:okp` | `:ed25519`, `:x25519` |
 
-`:okp` / `:ed25519` requires `com.google.crypto.tink/tink` when the key is used
+`:okp` / `:ed25519` requires `com.google.crypto.tink/tink` when you use the key
 for EdDSA. `:ec` / `:secp256k1` requires `org.bouncycastle/bcprov-jdk18on` when
-the key is used for ES256K. Without the optional dependency, the error keyword is
+you use the key for ES256K. Without the optional dependency, the error keyword is
 `:missing-optional-dep`.
 
 ## Inspect and serialize
@@ -73,14 +73,14 @@ the key is used for ES256K. Without the optional dependency, the error keyword i
 ;; => nil
 ```
 
-`jwk/->map` returns the complete JWK JSON representation as a Clojure map,
-including private parameters when present:
+`jwk/->map` returns the complete JWK JSON representation as a Clojure map. It
+includes private parameters when present:
 
 ```clojure
 (jwk/->map rsa-key)
 ```
 
-`jwk/->json` returns JSON. By default it includes private parameters. Pass
+`jwk/->json` returns JSON. By default, it includes private parameters. Pass
 `{:private? false}` to serialize the public form:
 
 ```clojure
@@ -93,8 +93,8 @@ symmetric key has no public form.
 
 ## Parse keys
 
-`jwk/parse` accepts a JWK JSON string, a Clojure map, or a Nimbus JWK. Nimbus JWK
-input is returned unchanged.
+`jwk/parse` accepts a JWK JSON string, a Clojure map, or a Nimbus JWK. It
+returns Nimbus JWK input unchanged.
 
 ```clojure
 (def parsed-from-json (jwk/parse (jwk/->json rsa-key)))
@@ -124,7 +124,7 @@ Malformed input throws `ex-info` with `{:jose/error :parse-failure}`.
 ```
 
 `jwk/parse-set` accepts a JWKS JSON string, a Clojure map, or a Nimbus `JWKSet`.
-Nimbus `JWKSet` input is returned unchanged.
+It returns Nimbus `JWKSet` input unchanged.
 
 `jwk/set->json` defaults to `{:private? false}` so public-only output is the
 default for sets.

@@ -26,7 +26,7 @@ com.google.crypto.tink/tink {:mvn/version "1.18.0"}
 org.bouncycastle/bcprov-jdk18on {:mvn/version "1.80"}
 ```
 
-If an EdDSA or ES256K path is used without its optional engine, jose-clj throws
+If you use an EdDSA or ES256K path without its optional engine, jose-clj throws
 `ex-info` with `{:jose/error :missing-optional-dep}`.
 
 ## Namespaces
@@ -65,7 +65,7 @@ If an EdDSA or ES256K path is used without its optional engine, jose-clj throws
 
 `jwt/sign` accepts a claims map. Registered time claims `:exp`, `:nbf`, and
 `:iat` can be `java.time.Instant` values or epoch seconds. `:expires-in` adds an
-`:exp` claim relative to now. `:now-iat? true` adds an `:iat` claim.
+`:exp` claim from the current time. `:now-iat? true` adds an `:iat` claim.
 
 ## First JWE
 
@@ -87,10 +87,10 @@ If an EdDSA or ES256K path is used without its optional engine, jose-clj throws
 
 ## Error contract
 
-Bad input is normalized to `ex-info`, not `NullPointerException`. jose-clj puts
-the machine-readable keyword under `:jose/error` in `ex-data`, and keeps the
+jose-clj normalizes bad input to `ex-info`, not `NullPointerException`. It puts
+the machine-readable keyword under `:jose/error` in `ex-data`. It keeps the
 underlying Java or Nimbus exception as `ex-cause` when one exists.
 
-The README has the error table covering parse failures, invalid options,
-signature failures, JWE failures, JWT claim validation, JWKS key selection,
-optional dependency failures, and URL failures.
+The README has the error table for parse failures, invalid options, signature
+failures, JWE failures, JWT claim validation, JWKS key selection, optional
+dependency failures, and URL failures.
