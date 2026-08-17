@@ -10,12 +10,21 @@ Send bug reports, fixes, and focused feature contributions for `jose-clj`.
 
 ## Project layout
 
-A `deps.edn` library with one namespace: `vector-search.core` - the
-embedded HNSW index API (`index`, `add!`, `search`, `remove!`, `get-item`,
-`size`, `save` / `load-index`) over hnswlib-core.
+A `deps.edn` library implementing JOSE on top of Nimbus JOSE + JWT. Source is
+under `src/jose/`, roughly one namespace per JOSE object:
 
-Hot paths operate on primitive float arrays and must stay reflection-free.
-Expected failures throw `ex-info` with a `:vector-search/error` key.
+| Namespace | Purpose |
+|---|---|
+| `jose.jws` | JSON Web Signature - sign and verify |
+| `jose.jwe` | JSON Web Encryption - encrypt and decrypt |
+| `jose.jwk` | JSON Web Key - key construction and coercion |
+| `jose.jwks` | JWK Set handling, including remote JWKS resolution |
+| `jose.jwt` | JSON Web Token - signed and encrypted claim sets |
+| `jose.keyring` | key selection and rotation helpers |
+| `jose.pem` | PEM encoding and decoding |
+
+Code must stay reflection-free (`*warn-on-reflection*` is on). Expected failures
+throw `ex-info` with a `:jose/error` key.
 
 ## Building and testing
 
@@ -28,8 +37,8 @@ clojure -M:1.12:test       # Clojure 1.12 matrix cell
 clojure -T:build jar       # build a jar
 ```
 
-The full suite is deterministic and self-contained. It uses a seeded RNG for
-the recall smoke test. There is nothing to download.
+The full suite is deterministic and self-contained. There is nothing to
+download and it makes no network calls.
 
 Requirements for a mergeable change:
 
