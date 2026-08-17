@@ -1,0 +1,9 @@
+{:linters
+ {:unused-referred-var
+  {:level :off
+   ;; Existing test namespaces refer `testing` for consistency but do not all use it.
+   }
+  :unresolved-namespace
+  {:level :off
+   ;; Existing JWS tests use fully qualified clojure.string calls without a require.
+   }}}
