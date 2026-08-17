@@ -6,6 +6,7 @@
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jose.crypto DirectDecrypter DirectEncrypter)
            (com.nimbusds.jose.jwk JWK OctetSequenceKey)
+           (com.nimbusds.jose.util Base64URL)
            (java.nio.charset StandardCharsets)))
 
 (def rfc-7516-rsa-jwk
@@ -100,6 +101,17 @@
   [f]
   (some-> (thrown f) ex-data))
 
+(defn rsa1-5-compact
+  [compact]
+  (str (Base64URL/encode "{\"alg\":\"RSA1_5\",\"enc\":\"A256GCM\"}")
+       (subs compact (.indexOf compact "."))))
+
+(defn rsa1-5-json
+  [json]
+  (str/replace json
+               #"(?<=\"protected\":\")[^\"]+"
+               (str (Base64URL/encode "{\"alg\":\"RSA1_5\",\"enc\":\"A256GCM\"}"))))
+
 (deftest rfc-decryption-vectors
   (testing "RFC 7516 appendix A.1: RSAES-OAEP + A256GCM"
     (is (= "The true sign of intelligence is not knowledge but imagination."
@@ -111,6 +123,17 @@
     (let [result (jwe/decrypt rfc-7520-5-5-ec-jwk rfc-7520-5-5-compact)]
       (is (str/starts-with? (:payload result) "You can trust us to stick with you"))
       (is (map? (get-in (jwe/header rfc-7520-5-5-compact) [:epk]))))))
+
+(deftest rsa1-5-decryption-is-rejected
+  (let [key (jwk/generate :rsa)
+        compact (rsa1-5-compact (jwe/encrypt key "hello" {:alg :rsa-oaep-256 :enc :a256gcm}))
+        json (rsa1-5-json (jwe/encrypt-json key "hello" {:alg :rsa-oaep-256
+                                                            :enc :a256gcm
+                                                            :serialization :flattened}))]
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwe/decrypt key compact)))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwe/decrypt-json key json)))))))
 
 (deftest encrypt-and-decrypt-round-trips
   (let [payload "hello jwe"

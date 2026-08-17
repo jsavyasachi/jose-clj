@@ -90,7 +90,8 @@
 (defn- algorithm
   ^JWEAlgorithm [alg]
   (cond
-    (#{:rsa1-5 "RSA1_5" "RSA1-5"} alg) (invalid-rsa1-5!)
+    (or (#{:rsa1-5 "RSA1_5" "RSA1-5"} alg)
+        (= JWEAlgorithm/RSA1_5 alg)) (invalid-rsa1-5!)
     (instance? JWEAlgorithm alg) alg
     (keyword? alg) (JWEAlgorithm/parse ^String (get alg-names alg (str/upper-case (name alg))))
     (string? alg) (JWEAlgorithm/parse ^String alg)
@@ -401,6 +402,7 @@
   (try
     (let [jwe (jwe-object compact)
           ^JWEHeader header (.getHeader jwe)]
+      (algorithm (.getAlgorithm header))
       (.decrypt jwe (decrypter (if (or (contains? pbes2-algs (.getAlgorithm header))
                                        (contains? ecdh-1pu-algs (.getAlgorithm header))
                                        (instance? JWEDecrypter key))
@@ -519,10 +521,11 @@
                            (keywordize-json-value (.toJSONObject header)))}))
 
 (defn- effective-json-header
-  ^JWEHeader [^JWEObjectJSON object]
+  (^JWEHeader [^JWEObjectJSON object]
+   (effective-json-header object (first (.getRecipients object))))
+  (^JWEHeader [^JWEObjectJSON object ^JWEObjectJSON$Recipient recipient]
   (let [^JWEHeader protected-header (.getHeader object)
         ^UnprotectedHeader unprotected-header (.getUnprotectedHeader object)
-        ^JWEObjectJSON$Recipient recipient (first (.getRecipients object))
         ^UnprotectedHeader recipient-header (.getUnprotectedHeader recipient)
         params (HashMap.)]
     (when unprotected-header
@@ -530,7 +533,7 @@
     (when recipient-header
       (.putAll params (.toJSONObject recipient-header)))
     (.putAll params (.toJSONObject protected-header))
-    (JWEHeader/parse ^Map params)))
+    (JWEHeader/parse ^Map params))))
 
 (defn- merged-aad
   ^bytes [^JWEHeader header ^bytes aad]
@@ -567,6 +570,8 @@
     (let [object (jwe-json-object json)
           header (.getHeader object)
           recipients (.getRecipients object)
+          _ (doseq [recipient recipients]
+              (algorithm (.getAlgorithm (effective-json-header object recipient))))
           special-key? (or (password? key)
                            (ecdh-1pu-keys? key)
                            (instance? JWEDecrypter key))
