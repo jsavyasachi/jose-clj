@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-08-17
+
+### Security
+
+- Reject the RSA1_5 (RSAES-PKCS1-v1_5) key-management algorithm on the
+  decryption paths (`decrypt` and `decrypt-json`), matching the existing
+  encrypt-side rejection. Accepting it on decrypt left the Bleichenbacher
+  padding-oracle exposure open.
+
 ## [0.5.0] - 2026-07-16
 ### Added
 - Nimbus JOSE parity pass. All additions are backward compatible and preserve the secure-by-default posture (`alg:none`, RSA1_5, and deprecated algorithms remain rejected).
