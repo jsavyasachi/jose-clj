@@ -295,6 +295,19 @@
     (is (= "subject" (:sub (jwt/process source nested policy))))
     (is (= "subject" (:sub (jwt/process (:jwk-source source) signed policy))))))
 
+(deftest reusable-jwt-processor-pipeline
+  (let [sign-key (jwk/generate :oct {:size 256 :kid "sig" :use :sig :alg :hs256})
+        source (jwks/local-source [sign-key])
+        policy {:jws-algs #{:hs256}
+                :jwe-algs #{:dir}
+                :jwe-encs #{:a256gcm}}
+        processor (jwt/build-processor source policy)
+        first-token (jwt/sign sign-key {:sub "first"})
+        second-token (jwt/sign sign-key {:sub "second"})]
+    (is (instance? ConfigurableJWTProcessor processor))
+    (is (= "first" (:sub (jwt/process-with-processor processor first-token))))
+    (is (= "second" (:sub (jwt/process-with-processor processor second-token))))))
+
 (deftest processor-requires-and-enforces-algorithm-policy
   (let [key (jwk/generate :oct {:size 512 :kid "sig" :use :sig})
         encrypt-key (jwk/generate :rsa {:kid "enc" :use :enc})
