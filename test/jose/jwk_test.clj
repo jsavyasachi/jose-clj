@@ -124,6 +124,30 @@
            metadata))
     (is (= #{"sign" "verify"} (set (:key_ops generated-map))))))
 
+(deftest metadata-accessors-return-clojure-values
+  (let [generated (jwk/generate :rsa
+                                {:kid "metadata"
+                                 :use :sig
+                                 :alg :rs256
+                                 :key-ops [:sign :verify]
+                                 :x5u "https://example.test/cert.pem"
+                                 :x5t "BwgJ"
+                                 :x5t#S256 "CwwN"
+                                 :iat (Instant/ofEpochSecond 100)
+                                 :nbf (Instant/ofEpochSecond 200)
+                                 :exp (Instant/ofEpochSecond 300)})]
+    (is (= :sig (jwk/key-use generated)))
+    (is (= #{:sign :verify} (jwk/key-operations generated)))
+    (is (= :rs256 (jwk/algorithm generated)))
+    (is (= "metadata" (jwk/key-id generated)))
+    (is (= (Instant/ofEpochSecond 100) (jwk/issue-time generated)))
+    (is (= (Instant/ofEpochSecond 200) (jwk/not-before-time generated)))
+    (is (= (Instant/ofEpochSecond 300) (jwk/expiration-time generated)))
+    (is (= "https://example.test/cert.pem" (jwk/x509-cert-url generated)))
+    (is (nil? (jwk/x509-cert-chain generated)))
+    (is (= "BwgJ" (jwk/x509-cert-thumbprint generated)))
+    (is (= "CwwN" (jwk/x509-cert-sha256-thumbprint generated)))))
+
 (deftest thumbprint-uri-is-rfc-9278-jkt-uri
   (let [thumbprint (jwk/thumbprint rfc-7638-rsa-jwk)]
     (is (= (str "urn:ietf:params:oauth:jwk-thumbprint:sha-256:" thumbprint)
