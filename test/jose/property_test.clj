@@ -103,7 +103,9 @@
           body (atom (jwk/set->json (jwk/jwk-set [(jwk/public-jwk old)])))
           {:keys [server url]} (rotation-server body)]
       (try
-        (let [source (jwks/remote-source url {:cache? false :retry? false})
+        (let [source (jwks/remote-source url {:https-only? false
+                                              :cache? false
+                                              :retry? false})
               old-token (jws/sign old payload {:alg :rs256})]
           (is (= payload (:payload (jws/verify-with-jwks source old-token {:alg :rs256}))))
           (reset! body (jwk/set->json (jwk/jwk-set [(jwk/public-jwk current)])))
