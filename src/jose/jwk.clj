@@ -92,7 +92,7 @@
       (when-not (contains? allowed option)
         (invalid-option! option)))))
 
-(defn- key-use
+(defn- parse-key-use
   [use]
   (case use
     nil nil
@@ -100,7 +100,7 @@
     :enc KeyUse/ENCRYPTION
     (invalid-option! :use)))
 
-(defn- algorithm
+(defn- parse-algorithm
   [alg]
   (cond
     (nil? alg) nil
@@ -163,8 +163,8 @@
 
 (defn- configure-generator!
   [^JWKGenerator generator opts]
-  (let [use (key-use (:use opts))
-        alg (algorithm (:alg opts))
+  (let [use (parse-key-use (:use opts))
+        alg (parse-algorithm (:alg opts))
         kid (:kid opts)
         operations (when-let [operations (:key-ops opts)]
                      (java-set (map key-operation operations)))]
@@ -314,6 +314,71 @@
   [jwk]
   (let [^JWK jwk (parse jwk)]
     (.getKeyID jwk)))
+
+(defn key-use
+  "Returns the JWK key use as :sig, :enc, or nil."
+  [jwk]
+  (let [^JWK jwk (parse jwk)
+        use (.getKeyUse jwk)]
+    (when use
+      (keyword (str/lower-case (.getValue ^KeyUse use))))))
+
+(defn key-operations
+  "Returns the JWK key operations as a set of keywords, or nil."
+  [jwk]
+  (let [^JWK jwk (parse jwk)
+        operations (.getKeyOperations jwk)]
+    (when operations
+      (set (map #(keyword (str/lower-case (.identifier ^KeyOperation %)))
+                operations)))))
+
+(defn algorithm
+  "Returns the JWK algorithm as a keyword, or nil."
+  [jwk]
+  (let [^JWK jwk (parse jwk)
+        alg (.getAlgorithm jwk)]
+    (when alg
+      (keyword (str/lower-case (str alg))))))
+
+(defn- instant
+  ^Instant [^Date value]
+  (when value
+    (Instant/ofEpochMilli (.getTime value))))
+
+(defn issue-time
+  "Returns the JWK issue time as an Instant, or nil."
+  [jwk]
+  (instant (.getIssueTime ^JWK (parse jwk))))
+
+(defn not-before-time
+  "Returns the JWK not-before time as an Instant, or nil."
+  [jwk]
+  (instant (.getNotBeforeTime ^JWK (parse jwk))))
+
+(defn expiration-time
+  "Returns the JWK expiration time as an Instant, or nil."
+  [jwk]
+  (instant (.getExpirationTime ^JWK (parse jwk))))
+
+(defn x509-cert-url
+  "Returns the JWK X.509 certificate URL as a string, or nil."
+  [jwk]
+  (some-> (.getX509CertURL ^JWK (parse jwk)) str))
+
+(defn x509-cert-chain
+  "Returns the JWK X.509 certificate chain as Base64 strings, or nil."
+  [jwk]
+  (some->> (.getX509CertChain ^JWK (parse jwk)) (mapv str)))
+
+(defn x509-cert-thumbprint
+  "Returns the JWK X.509 certificate SHA-1 thumbprint as a string, or nil."
+  [jwk]
+  (some-> (.getX509CertThumbprint ^JWK (parse jwk)) str))
+
+(defn x509-cert-sha256-thumbprint
+  "Returns the JWK X.509 certificate SHA-256 thumbprint as a string, or nil."
+  [jwk]
+  (some-> (.getX509CertSHA256Thumbprint ^JWK (parse jwk)) str))
 
 (defn private?
   [jwk]
