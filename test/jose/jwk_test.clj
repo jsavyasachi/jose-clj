@@ -7,6 +7,7 @@
            (java.io ByteArrayInputStream File)
            (java.nio.charset StandardCharsets)
            (java.nio.file Files)
+           (java.security KeyStore Security SecureRandom)
            (java.time Instant)
            (java.util Date)))
 
@@ -47,6 +48,51 @@
 (deftest generate-adds-kid-from-thumbprint-by-default
   (let [generated (jwk/generate :rsa {})]
     (is (= (jwk/thumbprint generated) (jwk/key-id generated)))))
+
+(deftest generate-accepts-jca-options
+  (let [random-a (SecureRandom/getInstance "SHA1PRNG")
+        random-b (SecureRandom/getInstance "SHA1PRNG")
+        ec-random-a (SecureRandom/getInstance "SHA1PRNG")
+        ec-random-b (SecureRandom/getInstance "SHA1PRNG")
+        okp-random-a (SecureRandom/getInstance "SHA1PRNG")
+        okp-random-b (SecureRandom/getInstance "SHA1PRNG")
+        seed (.getBytes "jose-clj-test-seed" StandardCharsets/UTF_8)
+        _ (.setSeed random-a seed)
+        _ (.setSeed random-b seed)
+        _ (.setSeed ec-random-a seed)
+        _ (.setSeed ec-random-b seed)
+        _ (.setSeed okp-random-a seed)
+        _ (.setSeed okp-random-b seed)
+        key-store (doto (KeyStore/getInstance "PKCS12")
+                    (.load nil nil))
+        provider (Security/getProvider "SunRsaSign")
+        oct-a (jwk/generate :oct {:size 256 :secure-random random-a})
+        oct-b (jwk/generate :oct {:size 256 :secure-random random-b})
+        ec-a (jwk/generate :ec {:curve :p-256 :secure-random ec-random-a})
+        ec-b (jwk/generate :ec {:curve :p-256 :secure-random ec-random-b})
+        okp-a (jwk/generate :okp {:curve :ed25519 :secure-random okp-random-a})
+        okp-b (jwk/generate :okp {:curve :ed25519 :secure-random okp-random-b})
+        rsa (jwk/generate :rsa {:size 2048 :provider provider})
+        stored (jwk/generate :oct {:size 256 :key-store key-store})]
+    (is (= (jwk/->map oct-a) (jwk/->map oct-b)))
+    (is (= (jwk/->map ec-a) (jwk/->map ec-b)))
+    (is (= (jwk/->map okp-a) (jwk/->map okp-b)))
+    (is (= :rsa (jwk/key-type rsa)))
+    (is (identical? key-store (.getKeyStore stored)))))
+
+(deftest generate-rejects-ignored-jca-options
+  (doseq [[kind opts option] [[:oct {:provider (Security/getProvider "SunRsaSign")} :provider]
+                             [:okp {:key-store (KeyStore/getInstance "PKCS12")} :key-store]
+                             [:okp {:curve :x25519
+                                    :secure-random (SecureRandom.)} :secure-random]]]
+    (testing [kind option]
+      (let [thrown (try
+                     (jwk/generate kind opts)
+                     nil
+                     (catch ExceptionInfo e
+                       e))]
+        (is (= :invalid-option (:jose/error (ex-data thrown))))
+        (is (= option (:option (ex-data thrown))))))))
 
 (deftest generate-round-trips-complete-metadata
   (let [generated (jwk/generate :rsa
@@ -158,5 +204,5 @@
     (doseq [loaded [(jwk/load-set ^File file)
                     (jwk/load-set (ByteArrayInputStream. bytes))
                     (jwk/load-set json)]]
-      (is (= ["loaded"] (mapv jwk/key-id (.getKeys loaded))))
+      (is (= ["loaded"] (mapv jwk/key-id (.getKeys ^JWKSet loaded))))
       (is (= {:issuer "example"} (jwk/set-members loaded))))))
