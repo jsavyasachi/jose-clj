@@ -210,6 +210,9 @@ places key-management data on each recipient.
 (def src (jwks/remote-source "https://www.googleapis.com/oauth2/v3/certs"
                              {:cache-ttl-ms 300000 :connect-timeout-ms 5000}))
 
+;; HTTPS is required by default; use :https-only? false only for a trusted
+;; non-TLS endpoint. :read-timeout-ms and :http-size-limit tune HTTP fetching.
+
 (jwks/get-keys src {:use :sig :kty :rsa})  ; matched keys
 (jwks/find-key src "kid-123")
 
