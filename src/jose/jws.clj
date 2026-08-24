@@ -8,7 +8,7 @@
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
-           (com.nimbusds.jose.util Base64 Base64URL)
+           (com.nimbusds.jose.util Base64 Base64URL JSONObjectUtils)
            (java.net URI)
            (java.nio.charset StandardCharsets)
            (java.security Provider Security)
@@ -152,6 +152,11 @@
       (fail! :header-mismatch "JWS cty header does not match" {:header :cty
                                                                 :expected (str (:cty opts))
                                                                 :actual actual-cty}))
+    (when (and (false? (.isBase64URLEncodePayload header))
+               (not (contains? critical "b64")))
+      (fail! :invalid-header
+             "Unencoded JWS payload must mark b64 as critical"
+             {:header :crit}))
     (when (contains? opts :crit)
       (let [understood (set (map #(if (keyword? %) (name %) (str %)) (:crit opts)))
             unsupported (seq (remove understood critical))]
@@ -400,7 +405,7 @@
    (verify (select-jwks-key source compact) compact opts)))
 
 (def ^:private json-options
-  #{:serialization :alg :kid :protected-headers :unprotected-headers})
+  #{:serialization :alg :kid :protected-headers :unprotected-headers :b64? :detached?})
 
 (defn- unprotected-header
   ^UnprotectedHeader [headers]
@@ -415,7 +420,7 @@
 (defn- json-signer-configs
   [key-or-signers opts]
   (if (sequential? key-or-signers)
-    key-or-signers
+    (mapv #(merge % (select-keys opts [:b64? :detached?])) key-or-signers)
     [(assoc (dissoc opts :serialization) :key key-or-signers)]))
 
 (defn- sign-json-signature!
@@ -434,22 +439,66 @@
       (.keyID builder protected-kid))
     (.sign object (.build builder) (unprotected-header unprotected-headers) (signer key))))
 
+(defn- json-payload-string
+  ^String [payload]
+  (cond
+    (string? payload) payload
+    (bytes? payload) (String. ^bytes payload StandardCharsets/UTF_8)
+    :else (throw (ex-info "Expected string or bytes payload"
+                          {:jose/error :invalid-option
+                           :option :payload}))))
+
+(defn- json-signature-map
+  [payload {:keys [key alg kid protected-headers unprotected-headers b64?] :as config}]
+  (doseq [option (keys (dissoc config :key))]
+    (when-not (contains? json-options option)
+      (invalid-option! option)))
+  (let [^JWK key (jwk/parse key)
+        b64? (not (false? b64?))
+        ^JWSHeader$Builder builder (JWSHeader$Builder. (algorithm (or alg (default-alg key))))
+        protected-kid (if (contains? config :kid)
+                        kid
+                        (when-not (contains? unprotected-headers :kid) (.getKeyID key)))
+        protected-headers (or protected-headers {})]
+    (doseq [[k v] protected-headers]
+      (apply-header! builder k v))
+    (when-not b64?
+      (.base64URLEncodePayload builder false)
+      (.criticalParams builder
+                       (conj (set (or (:crit protected-headers) [])) "b64")))
+    (when protected-kid
+      (.keyID builder protected-kid))
+    (let [^JWSHeader header (.build builder)
+          payload-string (json-payload-string payload)
+          object (JWSObject. header (Payload. ^String payload-string))]
+      (.sign object (signer key))
+      (cond-> {"protected" (.toString (.toBase64URL header))
+               "signature" (.toString (.getSignature object))}
+        (seq unprotected-headers) (assoc "header" (.toJSONObject (unprotected-header unprotected-headers)))))))
+
 (defn sign-json
   "Signs flattened or general JWS JSON with protected and unprotected headers."
   [key-or-signers payload-value opts]
   (let [serialization (:serialization opts :flattened)
-        signers (json-signer-configs key-or-signers opts)
-        object (JWSObjectJSON. (->payload payload-value))]
+        signers (json-signer-configs key-or-signers opts)]
     (when-not (#{:flattened :general} serialization)
       (invalid-option! :serialization))
     (when (and (= :flattened serialization) (not= 1 (count signers)))
       (invalid-option! :serialization))
     (try
-      (doseq [config signers]
-        (sign-json-signature! object config))
-      (if (= :flattened serialization)
-        (.serializeFlattened object)
-        (.serializeGeneral object))
+      (let [signatures (mapv #(json-signature-map payload-value %)
+                             signers)
+            payload-key (when-not (:detached? opts)
+                          (if (false? (:b64? opts true))
+                            payload-value
+                            (.toString (Base64URL/encode ^bytes (.getBytes (json-payload-string payload-value)
+                                                                            StandardCharsets/UTF_8)))))
+            result (if (= :flattened serialization)
+                     (merge (cond-> {} (some? payload-key) (assoc "payload" payload-key))
+                            (first signatures))
+                     (cond-> {"signatures" signatures}
+                       (some? payload-key) (assoc "payload" payload-key)))]
+        (JSONObjectUtils/toJSONString result))
       (catch JOSEException e
         (throw (jose-ex :sign-failure "Failed to sign JWS JSON" e {}))))))
 
@@ -487,16 +536,85 @@
      :unprotected-header (when unprotected
                            (keywordize-json-value (.toJSONObject unprotected)))}))
 
+(defn- json-signature-maps
+  [^Map parsed]
+  (let [payload (get parsed "payload")]
+    (if-let [signatures (get parsed "signatures")]
+      (mapv #(cond-> (into {} %)
+               (some? payload) (assoc "payload" payload)) signatures)
+      [(cond-> (dissoc (into {} parsed) "payload")
+         (some? payload) (assoc "payload" payload))])))
+
+(defn- verify-json-signature-map!
+  [^Map signature-map keys payload opts]
+  (let [^JWSHeader protected (JWSHeader/parse (Base64URL. ^String (get signature-map "protected")))
+        unprotected-map (get signature-map "header")
+        ^UnprotectedHeader unprotected (when unprotected-map
+                                         (UnprotectedHeader/parse ^Map unprotected-map))
+        kid (or (.getKeyID protected) (some-> unprotected .getKeyID))
+        external-payload? (some? payload)
+        supplied-payload (if external-payload? payload (get signature-map "payload"))
+        b64? (.isBase64URLEncodePayload protected)
+        payload-string (if b64?
+                        (when supplied-payload
+                          (if external-payload?
+                            (json-payload-string payload)
+                            (String. ^bytes (.decode (Base64URL. ^String supplied-payload)) StandardCharsets/UTF_8)))
+                        (when supplied-payload (json-payload-string supplied-payload)))]
+    (when (nil? payload-string)
+      (fail! :invalid-option "Detached JWS JSON requires an external payload" {:option :payload}))
+    (validate-verification-policy! protected opts)
+    (let [payload-segment (if b64?
+                            (.toString (Base64URL/encode ^bytes (.getBytes payload-string
+                                                                            StandardCharsets/UTF_8)))
+                            payload-string)
+          signing-input (.getBytes (str (get signature-map "protected") "." payload-segment)
+                                   StandardCharsets/UTF_8)
+          signature (Base64URL. ^String (get signature-map "signature"))]
+      (when-not (some (fn [key]
+                        (try
+                          (let [^JWSVerifier verifier (verifier key)]
+                            (.verify verifier protected ^bytes signing-input signature))
+                          (catch JOSEException _ false)
+                          (catch RuntimeException _ false)))
+                      (json-candidate-keys keys kid))
+        (throw (jose-ex :invalid-signature "Invalid JWS JSON signature" nil {:kid kid})))
+      {:protected-header (header-map protected)
+       :unprotected-header (when unprotected
+                             (keywordize-json-value (.toJSONObject unprotected)))})))
+
 (defn verify-json
   "Parses and verifies every signature in flattened or general JWS JSON."
   ([keys json]
    (verify-json keys json {}))
   ([keys json opts]
+   (verify-json keys json nil opts))
+  ([keys json payload opts]
    (validate-verify-options! opts)
-   (let [object (jws-json-object json)
-         signatures (mapv #(verify-json-signature! % keys opts) (.getSignatures object))
-         ^Payload payload (.getPayload object)
-         bytes (.toBytes payload)]
-     {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
-      :payload-bytes bytes
-      :signatures signatures})))
+   (try
+     (let [^Map parsed (JSONObjectUtils/parse ^String json)
+           signature-maps (json-signature-maps parsed)
+           signatures (mapv #(verify-json-signature-map! % keys payload opts)
+                            signature-maps)
+           ^JWSHeader first-header (JWSHeader/parse
+                                    (Base64URL. ^String (get (first signature-maps) "protected")))
+           embedded-payload (get parsed "payload")
+           payload-string (if (some? payload)
+                            (json-payload-string payload)
+                            (if (false? (.isBase64URLEncodePayload first-header))
+                              embedded-payload
+                              (when embedded-payload
+                                (String. ^bytes (.decode (Base64URL. ^String embedded-payload))
+                                         StandardCharsets/UTF_8))))
+           bytes (if (and payload (bytes? payload))
+                   ^bytes payload
+                   (.getBytes (json-payload-string payload-string) StandardCharsets/UTF_8))]
+       {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
+        :payload-bytes bytes
+        :signatures signatures})
+     (catch ParseException e
+       (throw (jose-ex :parse-failure "Failed to parse JWS JSON" e {})))
+     (catch RuntimeException e
+       (if (instance? clojure.lang.ExceptionInfo e)
+         (throw e)
+         (throw (jose-ex :parse-failure "Failed to parse JWS JSON" e {})))))))
