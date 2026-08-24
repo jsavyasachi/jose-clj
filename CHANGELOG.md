@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-08-24
+
+### Fixed
+
+- validate-algorithm now correctly validates string-form algorithm values via JWSAlgorithm/parse instead of skipping validation due to an unreachable cond branch.
+
 ## [0.6.0] - 2026-08-24
 
 ### Added

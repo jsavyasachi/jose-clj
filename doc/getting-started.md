@@ -5,13 +5,13 @@
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.6.0"}
+net.clojars.savya/jose-clj {:mvn/version "0.6.1"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/jose-clj "0.5.1"]
+[net.clojars.savya/jose-clj "0.6.1"]
 ```
 
 jose-clj requires JDK 11 or newer.
