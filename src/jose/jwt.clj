@@ -7,13 +7,14 @@
   (:import (com.nimbusds.jose EncryptionMethod Header JOSEException JOSEObjectType JWEAlgorithm JWEHeader JWSAlgorithm JWSHeader JWSHeader$Builder JWSProvider)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
-           (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
-           (com.nimbusds.jose.jwk.source JWKSource)
+           (com.nimbusds.jose.jwk Curve ECKey JWK JWKSet JWKSelector KeyType OctetKeyPair OctetSequenceKey RSAKey)
+           (com.nimbusds.jose.jwk.source ImmutableJWKSet JWKSource)
            (com.nimbusds.jose.proc BadJOSEException BadJWEException BadJWSException DefaultJOSEObjectTypeVerifier
                                    JWEDecryptionKeySelector JWEKeySelector JWSVerificationKeySelector SecurityContext)
            (com.nimbusds.jwt EncryptedJWT JWT JWTClaimsSet JWTClaimsSet$Builder JWTParser PlainJWT SignedJWT)
            (com.nimbusds.jwt.proc BadJWTException ConfigurableJWTProcessor DefaultJWTClaimsVerifier
-                                  DefaultJWTProcessor ExpiredJWTException JWTClaimsSetVerifier)
+                                  DefaultJWTProcessor ExpiredJWTException JWTClaimsSetAwareJWSKeySelector
+                                  JWTClaimsSetVerifier)
            (java.security Provider Security)
            (java.text ParseException)
            (java.time Instant)
@@ -32,7 +33,8 @@
 (def ^:private verify-options (into claim-verification-options #{:alg :algs :typ :cty :crit}))
 (def ^:private processor-options
   (into claim-verification-options
-        #{:jws-alg :jws-algs :jwe-alg :jwe-algs :jwe-enc :jwe-encs :typ}))
+        #{:jws-alg :jws-algs :jwe-alg :jwe-algs :jwe-enc :jwe-encs :typ
+          :jws-key-selector}))
 (def ^:private registered-claims #{"iss" "sub" "aud" "exp" "nbf" "iat" "jti"})
 
 (def ^:private alg-names
@@ -561,6 +563,30 @@
                         context)
         (ArrayList.)))))
 
+(defn- selected-jwk-source
+  ^JWKSource [^JWKSource default-source selection]
+  (cond
+    (instance? JWK selection) (ImmutableJWKSet. (JWKSet. ^JWK selection))
+    (instance? JWKSource selection) selection
+    (instance? JWKSource (:jwk-source selection)) (:jwk-source selection)
+    (instance? JWKSelector selection)
+    (reify JWKSource
+      (^List get [_ ^JWKSelector _ ^SecurityContext context]
+        (.get default-source selection context)))
+    :else (invalid-option! :jws-key-selector)))
+
+(defn- claims-aware-jws-key-selector
+  ^JWTClaimsSetAwareJWSKeySelector [jws-algs default-source callback]
+  (reify JWTClaimsSetAwareJWSKeySelector
+    (selectKeys [_ header claims context]
+      (let [selection (callback (.getIssuer ^JWTClaimsSet claims)
+                                (claims-map claims)
+                                (header-map header))]
+        (.selectJWSKeys (JWSVerificationKeySelector. ^Set jws-algs
+                                                     (selected-jwk-source default-source selection))
+                        header
+                        context)))))
+
 (defn- type-verifier
   ^DefaultJOSEObjectTypeVerifier [typ]
   (let [types (HashSet.)]
@@ -573,7 +599,9 @@
   :jws-algs, :jwe-algs, and :jwe-encs are required allow-lists. Singular
   :jws-alg, :jwe-alg, and :jwe-enc forms are also accepted. :typ optionally
   requires an exact JOSE type on signed and encrypted layers. Plain JWTs are
-  always rejected. Claims policy options are passed to claims-verifier."
+  always rejected. Claims policy options are passed to claims-verifier.
+  :jws-key-selector optionally accepts (fn [issuer claims headers] ...) and
+  may return a JWK, JWKSource, Source, or JWKSelector."
   ^ConfigurableJWTProcessor [source opts]
   (validate-options! processor-options opts)
   (let [source (jwk-source source)
@@ -581,7 +609,14 @@
         jwe-algs (expected-jwe-algorithms opts)
         jwe-encs (expected-encryption-methods opts)
         processor (DefaultJWTProcessor.)]
-    (.setJWSKeySelector processor (JWSVerificationKeySelector. jws-algs source))
+    (if-let [callback (:jws-key-selector opts)]
+      (do
+        (when-not (ifn? callback)
+          (invalid-option! :jws-key-selector))
+        (.setJWTClaimsSetAwareJWSKeySelector
+         processor
+         (claims-aware-jws-key-selector jws-algs source callback)))
+      (.setJWSKeySelector processor (JWSVerificationKeySelector. jws-algs source)))
     (.setJWEKeySelector processor (jwe-key-selector source jwe-algs jwe-encs))
     (.setJWTClaimsSetVerifier processor
                              (claims-verifier (select-keys opts claim-verification-options)))
