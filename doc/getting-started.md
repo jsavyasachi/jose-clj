@@ -5,7 +5,7 @@
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.5.1"}
+net.clojars.savya/jose-clj {:mvn/version "0.6.0"}
 ```
 
 Leiningen:
