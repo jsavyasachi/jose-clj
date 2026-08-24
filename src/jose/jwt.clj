@@ -7,13 +7,14 @@
   (:import (com.nimbusds.jose EncryptionMethod Header JOSEException JOSEObjectType JWEAlgorithm JWEHeader JWSAlgorithm JWSHeader JWSHeader$Builder JWSProvider)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
-           (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
-           (com.nimbusds.jose.jwk.source JWKSource)
+           (com.nimbusds.jose.jwk Curve ECKey JWK JWKSet JWKSelector KeyType OctetKeyPair OctetSequenceKey RSAKey)
+           (com.nimbusds.jose.jwk.source ImmutableJWKSet JWKSource)
            (com.nimbusds.jose.proc BadJOSEException BadJWEException BadJWSException DefaultJOSEObjectTypeVerifier
                                    JWEDecryptionKeySelector JWEKeySelector JWSVerificationKeySelector SecurityContext)
            (com.nimbusds.jwt EncryptedJWT JWT JWTClaimsSet JWTClaimsSet$Builder JWTParser PlainJWT SignedJWT)
            (com.nimbusds.jwt.proc BadJWTException ConfigurableJWTProcessor DefaultJWTClaimsVerifier
-                                  DefaultJWTProcessor ExpiredJWTException JWTClaimsSetVerifier)
+                                  DefaultJWTProcessor ExpiredJWTException JWTClaimsSetAwareJWSKeySelector
+                                  JWTClaimsSetVerifier)
            (java.security Provider Security)
            (java.text ParseException)
            (java.time Instant)
@@ -32,7 +33,8 @@
 (def ^:private verify-options (into claim-verification-options #{:alg :algs :typ :cty :crit}))
 (def ^:private processor-options
   (into claim-verification-options
-        #{:jws-alg :jws-algs :jwe-alg :jwe-algs :jwe-enc :jwe-encs :typ}))
+        #{:jws-alg :jws-algs :jwe-alg :jwe-algs :jwe-enc :jwe-encs :typ
+          :jws-key-selector}))
 (def ^:private registered-claims #{"iss" "sub" "aud" "exp" "nbf" "iat" "jti"})
 
 (def ^:private alg-names
@@ -50,6 +52,142 @@
    :es384 "ES384"
    :es512 "ES512"
    :eddsa "EdDSA"})
+
+(defn- invalid-policy!
+  [option value reason]
+  (throw (ex-info (format "Invalid policy option %s with value %s: %s"
+                          option (pr-str value) reason)
+                  {:jose/error :invalid-option
+                   :option option
+                   :value value
+                   :reason reason})))
+
+(defn- policy-algorithm?
+  [value]
+  (try
+    (cond
+      (instance? JWSAlgorithm value) true
+      (keyword? value) (JWSAlgorithm/parse ^String (get alg-names value (str/upper-case (name value)))) true
+      (string? value) (JWSAlgorithm/parse ^String value) true
+      :else false)
+    (catch RuntimeException _
+      false)))
+
+(defn- policy-jwe-algorithm?
+  [value]
+  (try
+    (let [name (cond
+                 (instance? JWEAlgorithm value) (str value)
+                 (keyword? value) (if (= :dir value) "dir" (str/upper-case (name value)))
+                 (string? value) value
+                 :else nil)]
+      (and name
+           (not (str/starts-with? (str/upper-case name) "RSA1"))
+           (JWEAlgorithm/parse ^String name)
+           true))
+    (catch RuntimeException _
+      false)))
+
+(defn- policy-encryption-method?
+  [value]
+  (try
+    (let [name (cond
+                 (instance? EncryptionMethod value) (str value)
+                 (keyword? value) (str/upper-case (name value))
+                 (string? value) value
+                 :else nil)]
+      (and name
+           (not (str/includes? (str/upper-case name) "CBC+"))
+           (EncryptionMethod/parse ^String name)
+           true))
+    (catch RuntimeException _
+      false)))
+
+(defn- policy-values
+  [opts option]
+  (let [value (get opts option)]
+    (when-not (or (sequential? value) (set? value))
+      (invalid-policy! option value "must be a non-empty collection"))
+    (when (empty? value)
+      (invalid-policy! option value "must not be empty"))
+    value))
+
+(defn- non-negative-integer?
+  [value]
+  (and (integer? value) (not (neg? value))))
+
+(defn- claim-collection?
+  [value]
+  (and (or (sequential? value) (set? value))
+       (not (string? value))))
+
+(defn- validate-claim-policy!
+  [opts]
+  (doseq [option [:clock-skew :max-age]]
+    (when (contains? opts option)
+      (let [value (get opts option)]
+        (when-not (non-negative-integer? value)
+          (invalid-policy! option value "must be a non-negative integer")))))
+  (when (contains? opts :verifier)
+    (let [value (:verifier opts)]
+      (when-not (ifn? value)
+        (invalid-policy! :verifier value "must be callable"))))
+  (doseq [option [:required :prohibited]]
+    (when (contains? opts option)
+      (let [value (get opts option)]
+        (when-not (claim-collection? value)
+          (invalid-policy! option value "must be a collection of claim names")))))
+  (when (contains? opts :exact)
+    (let [value (:exact opts)]
+      (when-not (map? value)
+        (invalid-policy! :exact value "must be a map of exact claim values")))))
+
+(defn validate-policy
+  "Validates and returns a JWT processor verification policy unchanged.
+
+  The policy must contain JWS, JWE key-management, and JWE content-encryption
+  algorithm allow-lists, using either the singular or plural spelling for each.
+  Invalid values identify the option, supplied value, and validation reason in
+  the returned ExceptionInfo data."
+  [opts]
+  (when-not (map? opts)
+    (invalid-policy! :policy opts "must be a map"))
+  (doseq [[option value] opts]
+    (when-not (contains? processor-options option)
+      (invalid-policy! option value "unknown option")))
+  (validate-claim-policy! opts)
+  (doseq [[singular plural] [[:jws-alg :jws-algs]
+                             [:jwe-alg :jwe-algs]
+                             [:jwe-enc :jwe-encs]]]
+    (when (and (contains? opts singular) (contains? opts plural))
+      (invalid-policy! singular (get opts singular)
+                       (format "conflicts with %s" plural))))
+  (doseq [[singular plural] [[:jws-alg :jws-algs]
+                             [:jwe-alg :jwe-algs]
+                             [:jwe-enc :jwe-encs]]]
+    (when-not (or (contains? opts singular) (contains? opts plural))
+      (invalid-policy! plural nil
+                       (format "required algorithm allow-list is missing; provide %s or %s"
+                               singular plural))))
+  (doseq [[singular plural] [[:jws-alg :jws-algs]
+                             [:jwe-alg :jwe-algs]
+                             [:jwe-enc :jwe-encs]]]
+    (let [option (if (contains? opts plural) plural singular)]
+      (when (contains? opts option)
+        (let [values (if (= option plural)
+                       (policy-values opts option)
+                       [(get opts option)])
+              valid? (case plural
+                       :jws-algs policy-algorithm?
+                       :jwe-algs policy-jwe-algorithm?
+                       :jwe-encs policy-encryption-method?)]
+          (doseq [value values]
+            (when-not (valid? value)
+              (invalid-policy! option value "contains an unsupported value")))
+          (when (and (= plural :jws-algs)
+                     (some #(= "none" (str/lower-case (str %))) values))
+            (invalid-policy! option values "the unsecured none algorithm is forbidden"))))))
+  opts)
 
 (defn- jose-ex
   [error message cause data]
@@ -561,27 +699,60 @@
                         context)
         (ArrayList.)))))
 
+(defn- selected-jwk-source
+  ^JWKSource [^JWKSource default-source selection]
+  (cond
+    (instance? JWK selection) (ImmutableJWKSet. (JWKSet. ^JWK selection))
+    (instance? JWKSource selection) selection
+    (instance? JWKSource (:jwk-source selection)) (:jwk-source selection)
+    (instance? JWKSelector selection)
+    (reify JWKSource
+      (^List get [_ ^JWKSelector _ ^SecurityContext context]
+        (.get default-source selection context)))
+    :else (invalid-option! :jws-key-selector)))
+
+(defn- claims-aware-jws-key-selector
+  ^JWTClaimsSetAwareJWSKeySelector [jws-algs default-source callback]
+  (reify JWTClaimsSetAwareJWSKeySelector
+    (selectKeys [_ header claims context]
+      (let [selection (callback (.getIssuer ^JWTClaimsSet claims)
+                                (claims-map claims)
+                                (header-map header))]
+        (.selectJWSKeys (JWSVerificationKeySelector. ^Set jws-algs
+                                                     (selected-jwk-source default-source selection))
+                        header
+                        context)))))
+
 (defn- type-verifier
   ^DefaultJOSEObjectTypeVerifier [typ]
   (let [types (HashSet.)]
     (.add types (JOSEObjectType. (str typ)))
     (DefaultJOSEObjectTypeVerifier. ^Set types)))
 
-(defn processor
+(defn build-processor
   "Builds a Nimbus ConfigurableJWTProcessor from a JWKS source and policy.
 
   :jws-algs, :jwe-algs, and :jwe-encs are required allow-lists. Singular
   :jws-alg, :jwe-alg, and :jwe-enc forms are also accepted. :typ optionally
   requires an exact JOSE type on signed and encrypted layers. Plain JWTs are
-  always rejected. Claims policy options are passed to claims-verifier."
+  always rejected. Claims policy options are passed to claims-verifier.
+  :jws-key-selector optionally accepts (fn [issuer claims headers] ...) and
+  may return a JWK, JWKSource, Source, or JWKSelector."
   ^ConfigurableJWTProcessor [source opts]
-  (validate-options! processor-options opts)
+  (validate-policy opts)
   (let [source (jwk-source source)
         jws-algs (expected-jws-algorithms opts)
         jwe-algs (expected-jwe-algorithms opts)
         jwe-encs (expected-encryption-methods opts)
         processor (DefaultJWTProcessor.)]
-    (.setJWSKeySelector processor (JWSVerificationKeySelector. jws-algs source))
+    (if-let [callback (:jws-key-selector opts)]
+      (do
+        (when-not (ifn? callback)
+          (invalid-option! :jws-key-selector))
+        (.setJWTClaimsSetAwareJWSKeySelector
+         processor
+         (claims-aware-jws-key-selector jws-algs source callback)))
+      (.setJWSKeySelector processor (JWSVerificationKeySelector. jws-algs source)))
     (.setJWEKeySelector processor (jwe-key-selector source jwe-algs jwe-encs))
     (.setJWTClaimsSetVerifier processor
                              (claims-verifier (select-keys opts claim-verification-options)))
@@ -590,6 +761,13 @@
         (.setJWSTypeVerifier processor verifier)
         (.setJWETypeVerifier processor verifier)))
     processor))
+
+(defn processor
+  "Builds a Nimbus ConfigurableJWTProcessor from a JWKS source and policy.
+
+  Compatibility alias for build-processor."
+  ^ConfigurableJWTProcessor [source opts]
+  (build-processor source opts))
 
 (defn- validate-processor-header!
   [compact opts]
@@ -635,22 +813,19 @@
       (jose-ex :not-a-nested-jwt message error {})
       :else (jose-ex :claim-verification-failure "JWT claims verification failed" error {}))))
 
-(defn process
-  "Processes a signed, encrypted, or nested compact JWT and returns claims.
+(defn process-with-processor
+  "Processes a compact JWT with a prebuilt processor and returns claims.
 
-  The policy requires explicit JWS, JWE, and content-encryption allow-lists.
-  Plain JWTs and alg:none are always rejected. The optional context is passed
-  to the claims verifier."
-  ([source compact opts]
-   (process source compact nil opts))
-  ([source compact context opts]
-   (let [processor (processor source opts)
-         ^SecurityContext context (if (or (nil? context) (instance? SecurityContext context))
+  The processor performs parsing, verification, decryption, and claims
+  verification. The optional context is passed to the claims verifier."
+  ([^ConfigurableJWTProcessor processor ^String compact]
+   (process-with-processor processor compact nil))
+  ([^ConfigurableJWTProcessor processor ^String compact context]
+   (let [^SecurityContext context (if (or (nil? context) (instance? SecurityContext context))
                                     context
                                     (JWTContext. context))]
-     (validate-processor-header! compact opts)
      (try
-       (claims-map (.process ^ConfigurableJWTProcessor processor ^String compact context))
+       (claims-map (.process processor compact context))
        (catch BadJWTException e
          (throw (processor-claims-error e)))
        (catch BadJWSException e
@@ -668,6 +843,19 @@
          (throw (jose-ex :parse-failure "Failed to parse JWT" e {})))
        (catch JOSEException e
          (throw (jose-ex :processing-failure "Failed to process JWT" e {})))))))
+
+(defn process
+  "Processes a signed, encrypted, or nested compact JWT and returns claims.
+
+  The policy requires explicit JWS, JWE, and content-encryption allow-lists.
+  Plain JWTs and alg:none are always rejected. The optional context is passed
+  to the claims verifier."
+  ([source compact opts]
+   (process source compact nil opts))
+  ([source compact context opts]
+   (let [processor (build-processor source opts)]
+     (validate-processor-header! compact opts)
+     (process-with-processor processor compact context))))
 
 (defn verify
   "Verifies a compact signed JWT and returns claims.

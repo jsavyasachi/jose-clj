@@ -32,13 +32,13 @@ Nimbus, and they stay correct as Nimbus is updated.
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.5.1"}
+net.clojars.savya/jose-clj {:mvn/version "0.6.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/jose-clj "0.5.1"]
+[net.clojars.savya/jose-clj "0.6.0"]
 ```
 
 Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. jose-clj is a thin wrapper, so you
@@ -209,6 +209,9 @@ places key-management data on each recipient.
 ;; cached remote source (defaults shown are Nimbus defaults; all optional)
 (def src (jwks/remote-source "https://www.googleapis.com/oauth2/v3/certs"
                              {:cache-ttl-ms 300000 :connect-timeout-ms 5000}))
+
+;; HTTPS is required by default; use :https-only? false only for a trusted
+;; non-TLS endpoint. :read-timeout-ms and :http-size-limit tune HTTP fetching.
 
 (jwks/get-keys src {:use :sig :kty :rsa})  ; matched keys
 (jwks/find-key src "kid-123")

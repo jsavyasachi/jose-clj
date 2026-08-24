@@ -4,9 +4,10 @@
   (:import (com.nimbusds.jose Algorithm KeySourceException RemoteKeySourceException)
            (com.nimbusds.jose.jwk Curve JWK JWKMatcher JWKMatcher$Builder
                                   JWKSelector KeyOperation KeyType KeyUse)
-           (com.nimbusds.jose.jwk.source ImmutableJWKSet JWKSource JWKSourceBuilder)
+           (com.nimbusds.jose.jwk.source ImmutableJWKSet JWKSource JWKSourceBuilder
+                                          RemoteJWKSet)
            (com.nimbusds.jose.proc SimpleSecurityContext)
-           (com.nimbusds.jose.util Base64URL DefaultResourceRetriever)
+           (com.nimbusds.jose.util Base64URL DefaultResourceRetriever ResourceRetriever)
            (com.nimbusds.jose.util.events EventListener)
            (com.nimbusds.jose.util.health HealthReportListener)
            (java.net MalformedURLException URI URISyntaxException URL)
@@ -16,7 +17,8 @@
 
 (def ^:private remote-options
   #{:cache? :cache-forever? :cache-ttl-ms :cache-refresh-ms
-    :connect-timeout-ms :read-timeout-ms
+    :connect-timeout-ms :read-timeout-ms :http-size-limit
+    :https-only? :resource-retriever
     :refresh-ahead? :refresh-ahead-ms :refresh-ahead-scheduled?
     :rate-limit? :rate-limit-ms :retry? :failover
     :outage-tolerant? :outage-ttl-ms :outage-forever?
@@ -108,6 +110,17 @@
       (throw (jose-ex :invalid-url "Invalid JWKS URL" e {:url s})))
     (catch IllegalArgumentException e
       (throw (jose-ex :invalid-url "Invalid JWKS URL" e {:url s})))))
+
+(defn- remote-url
+  ^URL [jwks-url opts]
+  (let [^URL value (url jwks-url)]
+    (when (and (not= "https" (.getProtocol value))
+               (get opts :https-only? true))
+      (throw (jose-ex :insecure-url
+                      "JWKS URL must use HTTPS"
+                      nil
+                      {:url jwks-url})))
+    value))
 
 (defn- key-type
   ^KeyType [kty]
@@ -203,18 +216,25 @@
       (= (str x5t) (some-> key .getX509CertThumbprint str))))
 
 (defn- resource-retriever
-  ^DefaultResourceRetriever [opts]
-  (when (or (contains? opts :connect-timeout-ms)
-            (contains? opts :read-timeout-ms))
-    (DefaultResourceRetriever.
-     (int (:connect-timeout-ms opts 5000))
-     (int (:read-timeout-ms opts 5000)))))
+  ^ResourceRetriever [opts]
+  (if-let [retriever (:resource-retriever opts)]
+    (if (instance? ResourceRetriever retriever)
+      retriever
+      (invalid-option! :resource-retriever))
+    (when (or (contains? opts :connect-timeout-ms)
+              (contains? opts :read-timeout-ms)
+              (contains? opts :http-size-limit))
+      (DefaultResourceRetriever.
+       (int (:connect-timeout-ms opts 5000))
+       (int (:read-timeout-ms opts 5000))
+       (int (:http-size-limit opts (RemoteJWKSet/resolveDefaultHTTPSizeLimit)))))))
 
 (defn- builder
   ^JWKSourceBuilder [jwks-url opts]
-  (if-let [retriever (resource-retriever opts)]
-    (JWKSourceBuilder/create (url jwks-url) retriever)
-    (JWKSourceBuilder/create (url jwks-url))))
+  (let [^URL value (remote-url jwks-url opts)]
+    (if-let [retriever (resource-retriever opts)]
+      (JWKSourceBuilder/create value retriever)
+      (JWKSourceBuilder/create value))))
 
 (defn- configure-builder!
   ^JWKSourceBuilder [^JWKSourceBuilder builder opts]

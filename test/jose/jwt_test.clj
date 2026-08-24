@@ -6,6 +6,7 @@
             [jose.jwks :as jwks]
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
+           (com.nimbusds.jose.jwk JWKSelector)
            (com.nimbusds.jwt JWTClaimsSet$Builder PlainJWT)
            (com.nimbusds.jwt.proc ConfigurableJWTProcessor JWTClaimsSetVerifier)
            (java.time Instant)))
@@ -295,6 +296,46 @@
     (is (= "subject" (:sub (jwt/process source nested policy))))
     (is (= "subject" (:sub (jwt/process (:jwk-source source) signed policy))))))
 
+(deftest reusable-jwt-processor-pipeline
+  (let [sign-key (jwk/generate :oct {:size 256 :kid "sig" :use :sig :alg :hs256})
+        source (jwks/local-source [sign-key])
+        policy {:jws-algs #{:hs256}
+                :jwe-algs #{:dir}
+                :jwe-encs #{:a256gcm}}
+        processor (jwt/build-processor source policy)
+        first-token (jwt/sign sign-key {:sub "first"})
+        second-token (jwt/sign sign-key {:sub "second"})]
+    (is (instance? ConfigurableJWTProcessor processor))
+    (is (= "first" (:sub (jwt/process-with-processor processor first-token))))
+    (is (= "second" (:sub (jwt/process-with-processor processor second-token))))))
+(deftest processor-supports-claims-aware-jws-key-selection
+  (let [key-a (jwk/generate :rsa {:kid "shared" :use :sig :alg :rs256})
+        key-b (jwk/generate :rsa {:kid "shared" :use :sig :alg :rs256})
+        key-c (jwk/generate :rsa {:kid "shared" :use :sig :alg :rs256})
+        base-source (jwks/local-source [(jwk/public-jwk key-a) (jwk/public-jwk key-b)])
+        sources {"tenant-a" (JWKSelector. (jwks/matcher {:kid "shared"}))
+                 "tenant-b" (jwks/local-source [(jwk/public-jwk key-b)])
+                 "tenant-c" (jwk/public-jwk key-c)}
+        seen (atom nil)
+        policy {:jws-algs #{:rs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}
+                :jws-key-selector
+                (fn [issuer claims headers]
+                  (reset! seen [issuer claims headers])
+                  (get sources issuer))}
+        compact-a (jwt/sign key-a {:iss "tenant-a" "role" "admin"}
+                            {:headers {:typ "JWT"}})
+        compact-b (jwt/sign key-b {:iss "tenant-b" "role" "admin"}
+                            {:headers {:typ "JWT"}})
+        compact-c (jwt/sign key-c {:iss "tenant-c" "role" "admin"}
+                            {:headers {:typ "JWT"}})]
+    (is (= "admin" (get (jwt/process base-source compact-a policy) "role")))
+    (is (= "admin" (get (jwt/process base-source compact-b policy) "role")))
+    (is (= "admin" (get (jwt/process base-source compact-c policy) "role")))
+    (is (= "tenant-c" (first @seen)))
+    (is (= "admin" (get (second @seen) "role")))
+    (is (= "JWT" (get (nth @seen 2) :typ)))))
 (deftest processor-requires-and-enforces-algorithm-policy
   (let [key (jwk/generate :oct {:size 512 :kid "sig" :use :sig})
         encrypt-key (jwk/generate :rsa {:kid "enc" :use :enc})
@@ -307,7 +348,7 @@
                                {:enc :a128gcm})
         plain (.serialize (PlainJWT. (.build (doto (JWTClaimsSet$Builder.)
                                                (.subject "subject")))))]
-    (is (= :algorithm-unspecified
+    (is (= :invalid-option
            (:jose/error (thrown-data #(jwt/process source substituted {})))))
     (is (= :algorithm-not-allowed
            (:jose/error (thrown-data #(jwt/process source substituted policy)))))
@@ -322,3 +363,65 @@
     (is (= :invalid-option
            (:jose/error (thrown-data #(jwt/processor source
                                                     (assoc policy :jwe-encs #{"A128CBC+HS256"}))))))))
+
+(deftest policy-validation-is-diagnostic-and-preserves-valid-options
+  (let [policy {:jws-algs #{:hs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}
+                :aud ["api"]}]
+    (is (= policy (jwt/validate-policy policy)))
+    (testing "unknown options identify their key and value"
+      (let [error (thrown #(jwt/validate-policy (assoc policy :wat 42)))]
+        (is (= :wat (:option (ex-data error))))
+        (is (= 42 (:value (ex-data error))))
+        (is (str/includes? (ex-message error) "unknown"))))
+    (testing "singular and plural algorithm options cannot conflict"
+      (let [error (thrown #(jwt/validate-policy (assoc policy :jws-alg :hs256)))]
+        (is (= :jws-alg (:option (ex-data error))))
+        (is (= :hs256 (:value (ex-data error))))
+        (is (str/includes? (ex-message error) "conflict"))))
+    (testing "invalid collection values identify the offending value"
+      (let [error (thrown #(jwt/validate-policy (assoc policy :jwe-encs :a256gcm)))]
+        (is (= :jwe-encs (:option (ex-data error))))
+        (is (= :a256gcm (:value (ex-data error))))
+        (is (str/includes? (ex-message error) "collection"))))))
+
+(deftest policy-validation-requires-all-algorithm-allow-lists
+  (doseq [[policy missing] [[{} :jws-algs]
+                            [{:jws-algs #{:hs256}} :jwe-algs]
+                            [{:jws-algs #{:hs256}
+                              :jwe-algs #{:rsa-oaep-256}} :jwe-encs]]]
+    (testing (str "missing " missing)
+      (let [error (thrown #(jwt/validate-policy policy))]
+        (is (= missing (:option (ex-data error))))
+        (is (nil? (:value (ex-data error))))
+        (is (str/includes? (:reason (ex-data error)) "required"))
+        (is (str/includes? (ex-message error) (name missing)))))))
+
+(deftest process-validates-policy-before-nimbus
+  (let [error (thrown #(jwt/process nil "not-a-jwt"
+                                   {:jws-algs #{:hs256}
+                                    :jwe-algs #{:rsa-oaep-256}
+                                   :jwe-encs :a256gcm}))]
+    (is (= :jwe-encs (:option (ex-data error))))
+    (is (= :a256gcm (:value (ex-data error))))
+    (is (str/includes? (ex-message error) "collection"))))
+
+(deftest claim-policy-validation-is-diagnostic
+  (let [policy {:jws-algs #{:hs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}}
+        cases [[:clock-skew "bad" "integer"]
+               [:clock-skew -1 "non-negative"]
+               [:max-age "bad" "integer"]
+               [:max-age -1 "non-negative"]
+               [:verifier 42 "callable"]
+               [:required "sub" "collection"]
+               [:prohibited {:sub true} "collection"]
+               [:exact [:role] "map"]]]
+    (doseq [[option value reason] cases]
+      (testing (str option " rejects " (pr-str value))
+        (let [error (thrown #(jwt/validate-policy (assoc policy option value)))]
+          (is (= option (:option (ex-data error))))
+          (is (= value (:value (ex-data error))))
+          (is (str/includes? (:reason (ex-data error)) reason)))))))

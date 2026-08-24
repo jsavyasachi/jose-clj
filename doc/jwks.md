@@ -19,6 +19,7 @@ also be local and in-memory.
                        :cache-refresh-ms 15000
                        :connect-timeout-ms 5000
                        :read-timeout-ms 5000
+                       :http-size-limit 51200
                        :rate-limit-ms 30000}))
 ```
 
@@ -30,10 +31,14 @@ Options:
 | `:cache-refresh-ms` | Cache refresh timeout in milliseconds. |
 | `:connect-timeout-ms` | HTTP connect timeout in milliseconds. |
 | `:read-timeout-ms` | HTTP read timeout in milliseconds. |
+| `:http-size-limit` | Maximum HTTP response size in bytes. |
+| `:https-only?` | Requires an HTTPS URL; defaults to `true`. Set to `false` only for explicitly trusted non-TLS endpoints. |
+| `:resource-retriever` | Custom Nimbus `ResourceRetriever`; takes precedence over the timeout and size options. |
 | `:rate-limit-ms` | Minimum interval for Nimbus rate limiting. |
 
-All options are optional. Without options, Nimbus uses its defaults. The remote
-source from Nimbus already caches keys.
+All options are optional. Without transport options, Nimbus uses its defaults.
+The remote source from Nimbus already caches keys. Non-HTTPS URLs are rejected
+by default with `{:jose/error :insecure-url}`.
 
 Invalid URLs throw `ex-info` with `{:jose/error :invalid-url}`. `jwks/get-keys`
 throws `{:jose/error :key-source-failure}` for a remote retrieval failure.
