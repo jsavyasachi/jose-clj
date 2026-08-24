@@ -53,6 +53,142 @@
    :es512 "ES512"
    :eddsa "EdDSA"})
 
+(defn- invalid-policy!
+  [option value reason]
+  (throw (ex-info (format "Invalid policy option %s with value %s: %s"
+                          option (pr-str value) reason)
+                  {:jose/error :invalid-option
+                   :option option
+                   :value value
+                   :reason reason})))
+
+(defn- policy-algorithm?
+  [value]
+  (try
+    (cond
+      (instance? JWSAlgorithm value) true
+      (keyword? value) (JWSAlgorithm/parse ^String (get alg-names value (str/upper-case (name value)))) true
+      (string? value) (JWSAlgorithm/parse ^String value) true
+      :else false)
+    (catch RuntimeException _
+      false)))
+
+(defn- policy-jwe-algorithm?
+  [value]
+  (try
+    (let [name (cond
+                 (instance? JWEAlgorithm value) (str value)
+                 (keyword? value) (if (= :dir value) "dir" (str/upper-case (name value)))
+                 (string? value) value
+                 :else nil)]
+      (and name
+           (not (str/starts-with? (str/upper-case name) "RSA1"))
+           (JWEAlgorithm/parse ^String name)
+           true))
+    (catch RuntimeException _
+      false)))
+
+(defn- policy-encryption-method?
+  [value]
+  (try
+    (let [name (cond
+                 (instance? EncryptionMethod value) (str value)
+                 (keyword? value) (str/upper-case (name value))
+                 (string? value) value
+                 :else nil)]
+      (and name
+           (not (str/includes? (str/upper-case name) "CBC+"))
+           (EncryptionMethod/parse ^String name)
+           true))
+    (catch RuntimeException _
+      false)))
+
+(defn- policy-values
+  [opts option]
+  (let [value (get opts option)]
+    (when-not (or (sequential? value) (set? value))
+      (invalid-policy! option value "must be a non-empty collection"))
+    (when (empty? value)
+      (invalid-policy! option value "must not be empty"))
+    value))
+
+(defn- non-negative-integer?
+  [value]
+  (and (integer? value) (not (neg? value))))
+
+(defn- claim-collection?
+  [value]
+  (and (or (sequential? value) (set? value))
+       (not (string? value))))
+
+(defn- validate-claim-policy!
+  [opts]
+  (doseq [option [:clock-skew :max-age]]
+    (when (contains? opts option)
+      (let [value (get opts option)]
+        (when-not (non-negative-integer? value)
+          (invalid-policy! option value "must be a non-negative integer")))))
+  (when (contains? opts :verifier)
+    (let [value (:verifier opts)]
+      (when-not (ifn? value)
+        (invalid-policy! :verifier value "must be callable"))))
+  (doseq [option [:required :prohibited]]
+    (when (contains? opts option)
+      (let [value (get opts option)]
+        (when-not (claim-collection? value)
+          (invalid-policy! option value "must be a collection of claim names")))))
+  (when (contains? opts :exact)
+    (let [value (:exact opts)]
+      (when-not (map? value)
+        (invalid-policy! :exact value "must be a map of exact claim values")))))
+
+(defn validate-policy
+  "Validates and returns a JWT processor verification policy unchanged.
+
+  The policy must contain JWS, JWE key-management, and JWE content-encryption
+  algorithm allow-lists, using either the singular or plural spelling for each.
+  Invalid values identify the option, supplied value, and validation reason in
+  the returned ExceptionInfo data."
+  [opts]
+  (when-not (map? opts)
+    (invalid-policy! :policy opts "must be a map"))
+  (doseq [[option value] opts]
+    (when-not (contains? processor-options option)
+      (invalid-policy! option value "unknown option")))
+  (validate-claim-policy! opts)
+  (doseq [[singular plural] [[:jws-alg :jws-algs]
+                             [:jwe-alg :jwe-algs]
+                             [:jwe-enc :jwe-encs]]]
+    (when (and (contains? opts singular) (contains? opts plural))
+      (invalid-policy! singular (get opts singular)
+                       (format "conflicts with %s" plural))))
+  (doseq [[singular plural] [[:jws-alg :jws-algs]
+                             [:jwe-alg :jwe-algs]
+                             [:jwe-enc :jwe-encs]]]
+    (when-not (or (contains? opts singular) (contains? opts plural))
+      (invalid-policy! plural nil
+                       (format "required algorithm allow-list is missing; provide %s or %s"
+                               singular plural))))
+  (doseq [[singular plural] [[:jws-alg :jws-algs]
+                             [:jwe-alg :jwe-algs]
+                             [:jwe-enc :jwe-encs]]]
+    (let [option (if (contains? opts plural) plural singular)]
+      (when (contains? opts option)
+        (let [values (if (= option plural)
+                       (policy-values opts option)
+                       [(get opts option)])
+              valid? (case plural
+                       :jws-algs policy-algorithm?
+                       :jwe-algs policy-jwe-algorithm?
+                       :jwe-encs policy-encryption-method?)]
+          (doseq [value values]
+            (when-not (valid? value)
+              (invalid-policy! option value "contains an unsupported value")))
+          (when (and (= plural :jws-algs)
+                     (some #(= "none" (str/lower-case (str %))) values))
+            (invalid-policy! option values "the unsecured none algorithm is forbidden"))))))
+  opts)
+
 (defn- jose-ex
   [error message cause data]
   (ex-info message (assoc data :jose/error error) cause))
@@ -603,7 +739,7 @@
   :jws-key-selector optionally accepts (fn [issuer claims headers] ...) and
   may return a JWK, JWKSource, Source, or JWKSelector."
   ^ConfigurableJWTProcessor [source opts]
-  (validate-options! processor-options opts)
+  (validate-policy opts)
   (let [source (jwk-source source)
         jws-algs (expected-jws-algorithms opts)
         jwe-algs (expected-jwe-algorithms opts)
