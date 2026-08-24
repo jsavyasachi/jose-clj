@@ -157,11 +157,11 @@
         retriever (reify ResourceRetriever
                     (retrieveResource [_ url]
                       (swap! requests conj (str url))
-                      (Resource. json "application/json")))]
-    (let [source (jwks/remote-source "https://example.test/jwks"
-                                     {:resource-retriever retriever})]
-      (is (= ["custom"] (mapv jwk/key-id (jwks/get-keys source {}))))
-      (is (= ["https://example.test/jwks"] @requests)))))
+                      (Resource. json "application/json")))
+        source (jwks/remote-source "https://example.test/jwks"
+                                   {:resource-retriever retriever})]
+    (is (= ["custom"] (mapv jwk/key-id (jwks/get-keys source {}))))
+    (is (= ["https://example.test/jwks"] @requests))))
 
 (deftest remote-source-accepts-cache-and-resilience-modes
   (is (jwks/remote-source "https://example.test/jwks"

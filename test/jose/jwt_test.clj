@@ -386,6 +386,11 @@
         (is (= :a256gcm (:value (ex-data error))))
         (is (str/includes? (ex-message error) "collection"))))))
 
+(deftest policy-algorithm-predicate-returns-a-boolean
+  (let [policy-algorithm? (deref (ns-resolve 'jose.jwt 'policy-algorithm?))]
+    (is (true? (policy-algorithm? "HS256")))
+    (is (false? (policy-algorithm? 42)))))
+
 (deftest policy-validation-requires-all-algorithm-allow-lists
   (doseq [[policy missing] [[{} :jws-algs]
                             [{:jws-algs #{:hs256}} :jwe-algs]

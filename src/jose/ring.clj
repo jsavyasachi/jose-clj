@@ -5,8 +5,8 @@
   default. It accepts either a verification JWK/key for `jose.jwt/verify` or
   a `jose.jwks` source for `jose.jwt/verify-with-jwks`."
   (:require [clojure.string :as str]
-            [jose.jwks :as jwks]
-            [jose.jwt :as jwt]))
+            [jose.jwt :as jwt])
+  (:import (jose.jwks Source)))
 
 (set! *warn-on-reflection* true)
 
@@ -31,7 +31,7 @@
 
 (defn- verify-token
   [verification-key token verify-opts]
-  (if (instance? jose.jwks.Source verification-key)
+  (if (instance? Source verification-key)
     (jwt/verify-with-jwks verification-key token verify-opts)
     (jwt/verify verification-key token verify-opts)))
 

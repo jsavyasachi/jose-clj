@@ -67,8 +67,12 @@
   (try
     (cond
       (instance? JWSAlgorithm value) true
-      (keyword? value) (JWSAlgorithm/parse ^String (get alg-names value (str/upper-case (name value)))) true
-      (string? value) (JWSAlgorithm/parse ^String value) true
+      (keyword? value) (do
+                          (JWSAlgorithm/parse ^String (get alg-names value (str/upper-case (name value))))
+                          true)
+      (string? value) (do
+                        (JWSAlgorithm/parse ^String value)
+                        true)
       :else false)
     (catch RuntimeException _
       false)))
