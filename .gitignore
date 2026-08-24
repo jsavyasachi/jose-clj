@@ -1,4 +1,6 @@
 /target
+/.worktrees/
+/.codex-runs/
 /.cpcache
 .clj-kondo/.cache
 .lsp/.cache

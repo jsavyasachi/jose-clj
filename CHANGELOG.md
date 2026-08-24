@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-08-24
+
+### Added
+
+- Added reusable JWT processors via `build-processor` and `process-with-processor`.
+- Added tenant- and issuer-aware JWT key selection.
+- Added `jose.ring` with Bearer-auth Ring middleware.
+- Added RFC 7797 detached and unencoded-payload JWS support.
+- Hardened remote JWKS transport with HTTPS enforcement, size and timeout limits, and a custom resource retriever.
+- Added JWK generator options for `SecureRandom`, `Provider`, and `KeyStore`.
+- Added JWK metadata accessors for use, operations, algorithm, timestamps, key ID, and X.509 chain.
+- Added a validated JWT policy builder with diagnostic errors.
+- Added a generative/property-based test suite using `test.check`.
+
 ## [0.5.1] - 2026-08-17
 
 ### Security
