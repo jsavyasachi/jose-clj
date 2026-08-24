@@ -6,6 +6,7 @@
             [jose.jwks :as jwks]
             [jose.jwt :as jwt])
   (:import (clojure.lang ExceptionInfo)
+           (com.nimbusds.jose.jwk JWKSelector)
            (com.nimbusds.jwt JWTClaimsSet$Builder PlainJWT)
            (com.nimbusds.jwt.proc ConfigurableJWTProcessor JWTClaimsSetVerifier)
            (java.time Instant)))
@@ -294,6 +295,35 @@
     (is (= "subject" (:sub (jwt/process source encrypted policy))))
     (is (= "subject" (:sub (jwt/process source nested policy))))
     (is (= "subject" (:sub (jwt/process (:jwk-source source) signed policy))))))
+
+(deftest processor-supports-claims-aware-jws-key-selection
+  (let [key-a (jwk/generate :rsa {:kid "shared" :use :sig :alg :rs256})
+        key-b (jwk/generate :rsa {:kid "shared" :use :sig :alg :rs256})
+        key-c (jwk/generate :rsa {:kid "shared" :use :sig :alg :rs256})
+        base-source (jwks/local-source [(jwk/public-jwk key-a) (jwk/public-jwk key-b)])
+        sources {"tenant-a" (JWKSelector. (jwks/matcher {:kid "shared"}))
+                 "tenant-b" (jwks/local-source [(jwk/public-jwk key-b)])
+                 "tenant-c" (jwk/public-jwk key-c)}
+        seen (atom nil)
+        policy {:jws-algs #{:rs256}
+                :jwe-algs #{:rsa-oaep-256}
+                :jwe-encs #{:a256gcm}
+                :jws-key-selector
+                (fn [issuer claims headers]
+                  (reset! seen [issuer claims headers])
+                  (get sources issuer))}
+        compact-a (jwt/sign key-a {:iss "tenant-a" "role" "admin"}
+                            {:headers {:typ "JWT"}})
+        compact-b (jwt/sign key-b {:iss "tenant-b" "role" "admin"}
+                            {:headers {:typ "JWT"}})
+        compact-c (jwt/sign key-c {:iss "tenant-c" "role" "admin"}
+                            {:headers {:typ "JWT"}})]
+    (is (= "admin" (get (jwt/process base-source compact-a policy) "role")))
+    (is (= "admin" (get (jwt/process base-source compact-b policy) "role")))
+    (is (= "admin" (get (jwt/process base-source compact-c policy) "role")))
+    (is (= "tenant-c" (first @seen)))
+    (is (= "admin" (get (second @seen) "role")))
+    (is (= "JWT" (get (nth @seen 2) :typ)))))
 
 (deftest processor-requires-and-enforces-algorithm-policy
   (let [key (jwk/generate :oct {:size 512 :kid "sig" :use :sig})
