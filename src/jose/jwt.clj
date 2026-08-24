@@ -567,7 +567,7 @@
     (.add types (JOSEObjectType. (str typ)))
     (DefaultJOSEObjectTypeVerifier. ^Set types)))
 
-(defn processor
+(defn build-processor
   "Builds a Nimbus ConfigurableJWTProcessor from a JWKS source and policy.
 
   :jws-algs, :jwe-algs, and :jwe-encs are required allow-lists. Singular
@@ -590,6 +590,13 @@
         (.setJWSTypeVerifier processor verifier)
         (.setJWETypeVerifier processor verifier)))
     processor))
+
+(defn processor
+  "Builds a Nimbus ConfigurableJWTProcessor from a JWKS source and policy.
+
+  Compatibility alias for build-processor."
+  ^ConfigurableJWTProcessor [source opts]
+  (build-processor source opts))
 
 (defn- validate-processor-header!
   [compact opts]
@@ -635,22 +642,19 @@
       (jose-ex :not-a-nested-jwt message error {})
       :else (jose-ex :claim-verification-failure "JWT claims verification failed" error {}))))
 
-(defn process
-  "Processes a signed, encrypted, or nested compact JWT and returns claims.
+(defn process-with-processor
+  "Processes a compact JWT with a prebuilt processor and returns claims.
 
-  The policy requires explicit JWS, JWE, and content-encryption allow-lists.
-  Plain JWTs and alg:none are always rejected. The optional context is passed
-  to the claims verifier."
-  ([source compact opts]
-   (process source compact nil opts))
-  ([source compact context opts]
-   (let [processor (processor source opts)
-         ^SecurityContext context (if (or (nil? context) (instance? SecurityContext context))
+  The processor performs parsing, verification, decryption, and claims
+  verification. The optional context is passed to the claims verifier."
+  ([^ConfigurableJWTProcessor processor ^String compact]
+   (process-with-processor processor compact nil))
+  ([^ConfigurableJWTProcessor processor ^String compact context]
+   (let [^SecurityContext context (if (or (nil? context) (instance? SecurityContext context))
                                     context
                                     (JWTContext. context))]
-     (validate-processor-header! compact opts)
      (try
-       (claims-map (.process ^ConfigurableJWTProcessor processor ^String compact context))
+       (claims-map (.process processor compact context))
        (catch BadJWTException e
          (throw (processor-claims-error e)))
        (catch BadJWSException e
@@ -668,6 +672,19 @@
          (throw (jose-ex :parse-failure "Failed to parse JWT" e {})))
        (catch JOSEException e
          (throw (jose-ex :processing-failure "Failed to process JWT" e {})))))))
+
+(defn process
+  "Processes a signed, encrypted, or nested compact JWT and returns claims.
+
+  The policy requires explicit JWS, JWE, and content-encryption allow-lists.
+  Plain JWTs and alg:none are always rejected. The optional context is passed
+  to the claims verifier."
+  ([source compact opts]
+   (process source compact nil opts))
+  ([source compact context opts]
+   (let [processor (build-processor source opts)]
+     (validate-processor-header! compact opts)
+     (process-with-processor processor compact context))))
 
 (defn verify
   "Verifies a compact signed JWT and returns claims.
