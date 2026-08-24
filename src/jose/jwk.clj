@@ -13,7 +13,7 @@
            (com.nimbusds.jose.util Base64 Base64URL)
            (java.io File IOException InputStream)
            (java.net URI)
-           (java.security KeyStore KeyStoreException)
+           (java.security KeyStore KeyStoreException Provider SecureRandom)
            (java.security.cert X509Certificate)
            (java.text ParseException)
            (java.time Instant)
@@ -25,10 +25,10 @@
   #{:kid :use :alg :key-ops :x5c :x5u :x5t :x5t#S256
     :iat :nbf :exp :revoked})
 (def ^:private type-options
-  {:rsa (conj common-options :size)
-   :ec (conj common-options :curve)
-   :okp (conj common-options :curve)
-   :oct (conj common-options :size)})
+  {:rsa (conj common-options :size :key-store :provider :secure-random)
+   :ec (conj common-options :curve :key-store :provider :secure-random)
+   :okp (conj common-options :curve :key-store :provider :secure-random)
+   :oct (conj common-options :size :key-store :provider :secure-random)})
 
 (def ^:private curves
   {:p-256 Curve/P_256
@@ -90,7 +90,18 @@
   (let [allowed (get type-options kind)]
     (doseq [option (keys opts)]
       (when-not (contains? allowed option)
-        (invalid-option! option)))))
+        (invalid-option! option)))
+    (when (and (= kind :oct) (contains? opts :provider))
+      (invalid-option! :provider))
+    (when (and (= kind :okp)
+               (or (contains? opts :provider)
+                   (contains? opts :key-store)))
+      (invalid-option! (if (contains? opts :provider) :provider :key-store)))
+    (when (and (= kind :okp)
+               (contains? opts :secure-random)
+               (= "x25519"
+                  (some-> (:curve opts) name str/lower-case)))
+      (invalid-option! :secure-random))))
 
 (defn- key-use
   [use]
@@ -180,6 +191,12 @@
       (.notBeforeTime generator (date :nbf (:nbf opts))))
     (when (contains? opts :exp)
       (.expirationTime generator (date :exp (:exp opts))))
+    (when (contains? opts :key-store)
+      (.keyStore generator ^KeyStore (:key-store opts)))
+    (when (contains? opts :provider)
+      (.provider generator ^Provider (:provider opts)))
+    (when (contains? opts :secure-random)
+      (.secureRandom generator ^SecureRandom (:secure-random opts)))
     (if (contains? opts :kid)
       (.keyID generator kid)
       (.keyIDFromThumbprint generator true))
