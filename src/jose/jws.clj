@@ -75,7 +75,8 @@
                     nil
                     {:option :algs}))))
 
-(defn- algorithm
+(defn algorithm
+  "Returns the Nimbus JWSAlgorithm for a keyword, string, or algorithm value."
   ^JWSAlgorithm [alg]
   (cond
     (instance? JWSAlgorithm alg) alg
@@ -283,7 +284,8 @@
       (invalid-option! :jwk))
     key))
 
-(defn- apply-header!
+(defn apply-header!
+  "Applies a keyword header option or custom header to a Nimbus builder."
   [^JWSHeader$Builder builder k v]
   (case k
     :jku (.jwkURL builder (URI. (str v)))
