@@ -51,7 +51,8 @@
    :es256k "ES256K"
    :es384 "ES384"
    :es512 "ES512"
-   :eddsa "EdDSA"})
+   :eddsa "EdDSA"
+   :ed25519 "Ed25519"})
 
 (defn- invalid-policy!
   [option value reason]

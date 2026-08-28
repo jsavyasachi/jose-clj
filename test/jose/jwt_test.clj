@@ -44,6 +44,20 @@
     (is (= iat (:iat claims)))
     (is (= "admin" (get claims "role")))))
 
+(deftest ed25519-jwt-and-processor-allow-list
+  (let [key (jwk/generate :okp {:curve :ed25519 :kid "ed" :use :sig :alg :ed25519})
+        source (jwks/local-source
+                [(jwk/parse (assoc (jwk/->map (jwk/public-jwk key))
+                                   :alg "EdDSA"))])
+        compact (jwt/sign key {:sub "subject"} {:alg :ed25519})
+        policy {:jws-algs #{:ed25519}
+                :jwe-algs #{:dir}
+                :jwe-encs #{:a256gcm}
+                :jws-key-selector (fn [_ _ _] key)}]
+    (is (= "subject" (:sub (jwt/verify (jwk/public-jwk key) compact
+                                        {:algs #{:ed25519}}))))
+    (is (instance? ConfigurableJWTProcessor (jwt/processor source policy)))))
+
 (deftest claims-are-available-without-verification
   (let [key (jwk/generate :oct {:size 256})
         compact (jwt/sign key {:sub "subject"

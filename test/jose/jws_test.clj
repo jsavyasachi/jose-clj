@@ -5,9 +5,10 @@
             [jose.jws :as jws])
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jose.crypto MACSigner MACVerifier)
+           (com.nimbusds.jose JWSHeader)
            (com.nimbusds.jose.jwk Curve JWK OctetSequenceKey OctetSequenceKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator)
-           (com.nimbusds.jose.util Base64URL)
+           (com.nimbusds.jose.util Base64URL JSONObjectUtils)
            (java.nio.charset StandardCharsets)
            (org.bouncycastle.jce.provider BouncyCastleProvider)))
 
@@ -122,6 +123,52 @@
       (is (= "hello" (:payload result)))
       (is (= :es256k (get-in result [:header :alg])))
       (is (= "ec-k" (get-in result [:header :kid]))))))
+
+(deftest ed25519-algorithm-round-trips
+  (let [key (jwk/generate :okp {:curve :ed25519})
+        compact (jws/sign key "hello" {:alg :ed25519})
+        header (JWSHeader/parse (Base64URL. (first (clojure.string/split compact #"\."))))]
+    (is (= "Ed25519" (str (.getAlgorithm header))))
+    (is (= "hello" (:payload (jws/verify key compact {:algs #{:ed25519}}))))))
+
+(deftest json-header-disjointness
+  (let [key (jwk/generate :oct {:size 256 :kid "a"})
+        error (thrown-data #(jws/sign-json key "hi"
+                                           {:alg :hs256
+                                            :protected-headers {:foo "p"}
+                                            :unprotected-headers {:foo "u"}}))]
+    (is (= :invalid-option (:jose/error error)))
+    (is (= :unprotected-headers (:option error)))
+    (is (= #{"foo"} (:params error))))
+  (let [key (jwk/generate :oct {:size 256 :kid "a"})
+        valid (jws/sign-json key "hi" {:alg :hs256
+                                        :protected-headers {:foo "p"}
+                                        :unprotected-headers {:bar "u"}})
+        parsed (JSONObjectUtils/parse valid)
+        invalid-header (doto (java.util.HashMap.) (.put "foo" "u"))]
+    (.put parsed "header" invalid-header)
+    (let [invalid (JSONObjectUtils/toJSONString parsed)]
+    (is (= :parse-failure
+           (:jose/error (thrown-data #(jws/verify-json key invalid {:algs #{:hs256}})))))))
+  (let [key-a (jwk/generate :oct {:size 256})
+        key-b (jwk/generate :oct {:size 256})
+        valid (jws/sign-json [{:key key-a :alg :hs256 :protected-headers {:first true}}
+                              {:key key-b :alg :hs256 :protected-headers {:second true}
+                               :unprotected-headers {:safe "u"}}]
+                             "hi" {:serialization :general})
+        parsed (JSONObjectUtils/parse valid)
+        signatures (vec (get parsed "signatures"))
+        second (second signatures)
+        invalid-header (doto (java.util.HashMap.) (.put "second" "u"))]
+    (.put second "header" invalid-header)
+    (let [invalid (JSONObjectUtils/toJSONString parsed)]
+    (is (= :parse-failure
+           (:jose/error (thrown-data #(jws/verify-json [key-a key-b] invalid
+                                                        {:algs #{:hs256}})))))))
+  (let [key (jwk/generate :oct {:size 256 :kid "a"})
+        json (jws/sign-json key "hi" {:alg :hs256
+                                       :unprotected-headers {:kid "a"}})]
+    (is (= "hi" (:payload (jws/verify-json [key] json {:algs #{:hs256}}))))))
 
 (deftest explicit-options-and-public-key-verification
   (let [key (jwk/generate :rsa {:kid "from-key"})

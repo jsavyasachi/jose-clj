@@ -1,5 +1,6 @@
 (ns jose.jws
   (:require [clojure.string :as str]
+            [clojure.set :as set]
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
   (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder
@@ -38,7 +39,8 @@
    :es256k "ES256K"
    :es384 "ES384"
    :es512 "ES512"
-   :eddsa "EdDSA"})
+   :eddsa "EdDSA"
+   :ed25519 "Ed25519"})
 
 (def ^:private name-algs
   (into {} (map (fn [[k v]] [v k]) alg-names)))
@@ -48,10 +50,13 @@
   (ex-info message (assoc data :jose/error error) cause))
 
 (defn- invalid-option!
-  [option]
-  (throw (ex-info (str "Invalid option " option)
-                  {:jose/error :invalid-option
-                   :option option})))
+  ([option]
+   (invalid-option! option {}))
+  ([option data]
+   (throw (ex-info (str "Invalid option " option)
+                   (assoc data
+                          :jose/error :invalid-option
+                          :option option)))))
 
 (defn- validate-options!
   [opts]
@@ -417,6 +422,18 @@
           (.param builder (name k) (stringify-json-value v))))
       (.build builder))))
 
+(defn- validate-json-header-disjointness!
+  [^JWSHeader protected ^UnprotectedHeader unprotected error]
+  (when unprotected
+    (let [params (set/intersection (set (.getIncludedParams protected))
+                                   (set (.getIncludedParams unprotected)))]
+      (when (seq params)
+        (if (= :sign error)
+          (invalid-option! :unprotected-headers {:params params})
+          (fail! :parse-failure
+                 "JWS protected and unprotected header parameters must be disjoint"
+                 {:params params}))))))
+
 (defn- json-signer-configs
   [key-or-signers opts]
   (if (sequential? key-or-signers)
@@ -453,12 +470,14 @@
     (when protected-kid
       (.keyID builder protected-kid))
     (let [^JWSHeader header (.build builder)
-          payload-string (json-payload-string payload)
-          object (JWSObject. header (Payload. ^String payload-string))]
-      (.sign object (signer key))
-      (cond-> {"protected" (.toString (.toBase64URL header))
-               "signature" (.toString (.getSignature object))}
-        (seq unprotected-headers) (assoc "header" (.toJSONObject (unprotected-header unprotected-headers)))))))
+          ^UnprotectedHeader unprotected (unprotected-header unprotected-headers)]
+      (validate-json-header-disjointness! header unprotected :sign)
+      (let [payload-string (json-payload-string payload)
+            object (JWSObject. header (Payload. ^String payload-string))]
+        (.sign object (signer key))
+        (cond-> {"protected" (.toString (.toBase64URL header))
+                 "signature" (.toString (.getSignature object))}
+          unprotected (assoc "header" (.toJSONObject unprotected)))))))
 
 (defn sign-json
   "Signs flattened or general JWS JSON with protected and unprotected headers."
@@ -552,6 +571,12 @@
    (try
      (let [^Map parsed (JSONObjectUtils/parse ^String json)
            signature-maps (json-signature-maps parsed)
+           _ (doseq [signature-map signature-maps]
+               (let [^JWSHeader protected (JWSHeader/parse (Base64URL. ^String (get signature-map "protected")))
+                     unprotected-map (get signature-map "header")
+                     ^UnprotectedHeader unprotected (when unprotected-map
+                                                      (UnprotectedHeader/parse ^Map unprotected-map))]
+                 (validate-json-header-disjointness! protected unprotected :verify)))
            signatures (mapv #(verify-json-signature-map! % keys payload opts)
                             signature-maps)
            ^JWSHeader first-header (JWSHeader/parse
