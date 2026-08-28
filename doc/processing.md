@@ -1,0 +1,44 @@
+# Generic JOSE processing
+
+Use `jose.proc` when the payload is an arbitrary string or byte sequence rather
+than a JWT claims set. Use `jose.jwt` when you need JWT claims validation,
+nested JWT handling, or the JWT convenience functions.
+
+Build a processor with a JWKS source and explicit algorithm policies. JWS
+algorithms are supplied as `:jws-algs` (or singular `:jws-alg`), JWE key
+management algorithms as `:jwe-algs`, and content-encryption methods as
+`:jwe-encs`. `:typ` optionally requires an exact JOSE type. Plain unsecured
+objects are rejected.
+
+```clojure
+(require '[jose.jwk :as jwk]
+         '[jose.jwks :as jwks]
+         '[jose.proc :as proc])
+
+(let [key (jwk/generate :oct {:size 256 :kid "signing-key"})
+      source (jwks/local-source [key])
+      processor (proc/processor source
+                                 {:jws-algs #{:hs256}
+                                  :jwe-algs #{:dir}
+                                  :jwe-encs #{:a256gcm}})]
+  (proc/process processor compact-serialization))
+;; => {:payload "arbitrary payload", :payload-bytes ...}
+```
+
+For key selection derived from the keys in a source, use
+`(proc/jws-key-selector :rsa source)` (or `:hmac-sha`, `:ec`, `:ed`, or
+`:signature`) as `:jws-key-selector`. The selector can also be made directly
+from a Nimbus source with `jws-key-selector`, or from a JWKS
+URL with `jws-key-selector-from-jwk-set-url`. For one key, use
+`single-key-selector`. A `security-context` can supply JWKs per call:
+`(proc/process processor compact (proc/security-context [key]))`.
+
+`matcher` returns a predicate for JOSE objects or compact strings. Its
+criteria are `:classes` (such as `:jws` or `:jwe`), `:algorithms`, `:encryption-methods`, `:jwk-urls`,
+and `:key-ids`.
+
+Nimbus 10.9.1 has an upstream limitation: `JWSVerificationKeySelector` does
+not resolve EdDSA keys from a JWK source. Pass the key directly with a
+single-key selector, or provide a custom `:jws-key-selector` when processing
+EdDSA. This is also present in the library's existing JWT and JWS JWKS
+helpers.
