@@ -4,12 +4,37 @@
             [jose.jwks :as jwks])
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jose.jwk JWK JWKSet)
-           (java.io ByteArrayInputStream File)
+           (java.io ByteArrayInputStream File FileInputStream)
            (java.nio.charset StandardCharsets)
            (java.nio.file Files)
-           (java.security KeyStore Security SecureRandom)
+           (java.security Key KeyStore KeyPairGenerator PrivateKey PublicKey Security SecureRandom Signature)
+           (javax.crypto KeyAgreement)
            (java.time Instant)
            (java.util Date)))
+
+(defn generated-multi-keystore
+  []
+  (let [directory (Files/createTempDirectory "jose-clj-multi-keystore-"
+                                              (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve directory "test.jks")
+        keytool (str (System/getProperty "java.home") "/bin/keytool")
+        commands [["one" "onepass"] ["two" "twopass"]]]
+    (doseq [[alias password] commands]
+      (let [process (-> (ProcessBuilder.
+                         [keytool "-genkeypair" "-alias" alias "-keyalg" "RSA"
+                          "-keysize" "2048" "-dname" (str "CN=" alias)
+                          "-validity" "1" "-storetype" "JKS"
+                          "-keystore" (str path) "-storepass" "storepass"
+                          "-keypass" password "-noprompt"])
+                        (.redirectErrorStream true)
+                        (.start))]
+        (.readAllBytes (.getInputStream process))
+        (when-not (zero? (.waitFor process))
+          (throw (ex-info "keytool failed" {:alias alias})))))
+    (let [keystore (KeyStore/getInstance "JKS")]
+      (with-open [input (FileInputStream. (.toFile path))]
+        (.load keystore input (.toCharArray "storepass")))
+      keystore)))
 
 ;; This test vector is from RFC 7638 section 3.1.
 (def rfc-7638-rsa-jwk
@@ -230,3 +255,66 @@
                     (jwk/load-set json)]]
       (is (= ["loaded"] (mapv jwk/key-id (.getKeys ^JWKSet loaded))))
       (is (= {:issuer "example"} (jwk/set-members loaded))))))
+
+(deftest jwks-convert-to-java-keys
+  (doseq [[kind opts] [[:rsa {:size 2048}]
+                       [:ec {:curve :p-256}]
+                       [:okp {:curve :ed25519}]
+                       [:oct {:size 256}]]]
+    (testing kind
+      (let [private (jwk/generate kind opts)
+            public (jwk/public-jwk private)
+            to-java-private-key (resolve 'jose.jwk/to-java-private-key)
+            private-key (if (= :oct kind)
+                          (first (jwk/to-java-keys private))
+                          (when to-java-private-key (to-java-private-key private)))
+            public-key (when public (first (jwk/to-java-keys public))) ]
+        (is (some? to-java-private-key))
+      (is (instance? Key private-key))
+        (when public
+          (is (instance? Key public-key))
+          (is (= (.getAlgorithm ^Key private-key) (.getAlgorithm ^Key public-key))))))))
+
+(deftest mixed-jwk-collections-do-not-drop-okp-keys
+  (let [rsa (jwk/generate :rsa {:size 2048})
+        okp (jwk/generate :okp {:curve :ed25519})
+        keys (jwk/to-java-keys [rsa okp])]
+    (is (= 4 (count keys)))
+    (is (= #{"RSA" "EdDSA"} (set (map #(.getAlgorithm ^Key %) keys))))))
+
+(deftest okp-java-keys-work-with-jdk-crypto
+  (let [ed (jwk/generate :okp {:curve :ed25519})
+        [ed-public ed-private] (jwk/to-java-keys ed)
+        message (.getBytes "jose-clj" StandardCharsets/UTF_8)
+        signature (doto (Signature/getInstance "Ed25519")
+                    (.initSign ^PrivateKey ed-private)
+                    (.update message))
+        bytes (.sign signature)]
+    (is (.verify (doto (Signature/getInstance "Ed25519")
+                   (.initVerify ^PublicKey ed-public)
+                   (.update message)) bytes)))
+  (let [first-key (jwk/generate :okp {:curve :x25519})
+        second-key (jwk/generate :okp {:curve :x25519})
+        [first-public first-private] (jwk/to-java-keys first-key)
+        [second-public second-private] (jwk/to-java-keys second-key)
+        first-secret (doto (KeyAgreement/getInstance "X25519")
+                       (.init ^PrivateKey first-private)
+                       (.doPhase ^PublicKey second-public true))
+        second-secret (doto (KeyAgreement/getInstance "X25519")
+                        (.init ^PrivateKey second-private)
+                        (.doPhase ^PublicKey first-public true))]
+    (is (= (seq (.generateSecret first-secret))
+           (seq (.generateSecret second-secret))))))
+
+(deftest keystore-loads-with-per-alias-passwords
+  (let [keystore (generated-multi-keystore)
+        _ (.setCertificateEntry keystore "trusted" (.getCertificate keystore "one"))
+        loaded (jwk/keystore->jwks keystore {"one" "onepass" "two" "twopass"})]
+    (is (instance? JWKSet loaded))
+    (is (= #{"one" "two"} (set (map jwk/key-id (.getKeys loaded)))))
+    (let [thrown (try
+                   (jwk/keystore->jwks keystore {"one" "wrong" "two" "twopass"})
+                   nil
+                   (catch ExceptionInfo e e))]
+      (is (= :key-import-failure (:jose/error (ex-data thrown))))
+      (is (= "one" (:alias (ex-data thrown)))))))
