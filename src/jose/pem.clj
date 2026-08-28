@@ -3,10 +3,11 @@
             [jose.jwk :as jwk])
   (:import (com.nimbusds.jose JOSEException)
            (com.nimbusds.jose.jwk ECKey JWK KeyType OctetKeyPair RSAKey)
-           (com.nimbusds.jose.util X509CertUtils)
+           (com.nimbusds.jose.util X509CertChainUtils X509CertUtils)
+           (java.io File IOException)
            (java.security PrivateKey PublicKey)
-           (java.security.cert CertificateException X509Certificate)
-           (java.util Base64)))
+           (java.security.cert CertificateEncodingException CertificateException X509Certificate)
+           (java.util ArrayList Base64)))
 
 (set! *warn-on-reflection* true)
 
@@ -86,6 +87,55 @@
       (parse-failure! "Failed to parse X.509 certificate PEM" e))
     (catch RuntimeException e
       (parse-failure! "Failed to parse X.509 certificate PEM" e))))
+
+(declare pem-block)
+
+(defn- parse-chain
+  [source]
+  (try
+    (let [certificates (vec (if (instance? File source)
+                              (X509CertChainUtils/parse ^File source)
+                              (X509CertChainUtils/parse ^String (str source))))]
+      (if (seq certificates)
+        certificates
+        (parse-failure! "Failed to parse X.509 certificate chain PEM" nil)))
+    (catch NoClassDefFoundError e (missing-bcpkix! e))
+    (catch ClassNotFoundException e (missing-bcpkix! e))
+    (catch IOException e (parse-failure! "Failed to parse X.509 certificate chain PEM" e))
+    (catch CertificateException e (parse-failure! "Failed to parse X.509 certificate chain PEM" e))
+    (catch RuntimeException e (parse-failure! "Failed to parse X.509 certificate chain PEM" e))))
+
+(defn pem->certificates
+  "Parses a PEM string or File containing an X.509 certificate chain."
+  [source]
+  (parse-chain source))
+
+(defn certificates->pem
+  "Renders an X.509 certificate chain as concatenated PEM blocks."
+  ^String [certificates]
+  (try
+    (apply str (map #(pem-block "CERTIFICATE" (.getEncoded ^X509Certificate %)) certificates))
+    (catch CertificateEncodingException e
+      (parse-failure! "Failed to encode X.509 certificate chain PEM" e))))
+
+(defn pem->x5c
+  "Parses a PEM certificate chain into JWK x5c Base64 strings."
+  [source]
+  (mapv #(str (.encodeToString (Base64/getEncoder) (.getEncoded ^X509Certificate %)))
+        (pem->certificates source)))
+
+(defn x5c->certificates
+  "Parses JWK x5c Base64 strings into X.509 certificates."
+  [x5c]
+  (try
+    (let [encoded (ArrayList.)]
+      (doseq [value x5c]
+        (.add encoded (com.nimbusds.jose.util.Base64. (str value))))
+      (vec (X509CertChainUtils/parse ^java.util.List encoded)))
+    (catch java.text.ParseException e
+      (parse-failure! "Failed to parse JWK X.509 certificate chain" e))
+    (catch RuntimeException e
+      (parse-failure! "Failed to parse JWK X.509 certificate chain" e))))
 
 (defn- wrap64
   [^String encoded]

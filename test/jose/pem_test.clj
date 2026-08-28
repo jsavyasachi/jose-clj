@@ -136,3 +136,40 @@
                                                   {:private? true})))))
   (is (= :parse-failure
          (:jose/error (thrown-data #(pem/pem->jwk "not pem"))))))
+
+(deftest certificate-chain-round-trips-through-x5c
+  (let [chain-pem (str certificate-pem certificate-pem)
+        pem->certificates (resolve 'jose.pem/pem->certificates)
+        pem->x5c (resolve 'jose.pem/pem->x5c)
+        certificates->pem (resolve 'jose.pem/certificates->pem)
+        x5c->certificates (resolve 'jose.pem/x5c->certificates)
+        x509-certificates (resolve 'jose.jwk/x509-certificates)]
+    (is (some? pem->certificates))
+    (is (some? pem->x5c))
+    (is (some? certificates->pem))
+    (is (some? x5c->certificates))
+    (is (some? x509-certificates))
+    (when (every? some? [pem->certificates pem->x5c certificates->pem
+                       x5c->certificates x509-certificates])
+      (let [certificates (pem->certificates chain-pem)
+            x5c (pem->x5c chain-pem)
+            generated (jwk/parse (assoc (jwk/->map (jwk/certificate->jwk
+                                                    (first certificates)))
+                                        :x5c x5c))
+            parsed (x509-certificates generated)]
+        (is (= 2 (count certificates)))
+        (is (= certificates (x5c->certificates x5c)))
+        (is (= 2 (count x5c)))
+        (is (= certificates parsed))
+        (is (= chain-pem (certificates->pem certificates)))))))
+
+(deftest malformed-certificate-chain-is-ex-info
+  (is (= :parse-failure
+         (:jose/error (when-let [f (resolve 'jose.pem/pem->certificates)]
+                        (thrown-data #(f "not pem")))))))
+
+(deftest certificate-chain-file-arity
+  (let [file (.toFile (Files/createTempFile "jose-clj-chain-" ".pem"
+                                             (make-array java.nio.file.attribute.FileAttribute 0)))]
+    (spit file (str certificate-pem certificate-pem))
+    (is (= 2 (count (pem/pem->certificates file))))))

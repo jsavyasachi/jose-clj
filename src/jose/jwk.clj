@@ -3,7 +3,8 @@
   (:import (com.nimbusds.jose Algorithm JOSEException)
            (com.nimbusds.jose.jwk Curve ECKey$Builder JWK JWKMatcher JWKSet
                                   KeyOperation KeyRevocation KeyRevocation$Reason
-                                  KeyType KeyUse
+                                  KeyType KeyUse KeyConverter PasswordLookup
+                                  RSAKey ECKey OctetKeyPair OctetSequenceKey
                                   OctetKeyPair$Builder OctetSequenceKey$Builder
                                   RSAKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator JWKGenerator
@@ -13,8 +14,9 @@
            (com.nimbusds.jose.util Base64 Base64URL)
            (java.io File IOException InputStream)
            (java.net URI)
-           (java.security KeyStore KeyStoreException Provider SecureRandom)
+           (java.security Key KeyFactory KeyStore KeyStoreException PrivateKey Provider SecureRandom)
            (java.security.cert X509Certificate)
+           (java.security.spec PKCS8EncodedKeySpec X509EncodedKeySpec)
            (java.text ParseException)
            (java.time Instant)
            (java.util ArrayList Date HashSet List Map Set)))
@@ -37,6 +39,20 @@
    :secp256k1 Curve/SECP256K1
    :ed25519 Curve/Ed25519
    :x25519 Curve/X25519})
+
+;; RFC 8410 SubjectPublicKeyInfo prefixes for id-Ed25519 (1.3.101.112) and
+;; id-X25519 (1.3.101.110). They encode SEQUENCE/algorithm/unused-bits and
+;; leave the final 32-byte public key to be appended below.
+(def ^:private okp-ed25519-spki-prefix
+  (byte-array [48 42 48 5 6 3 43 101 112 3 33 0]))
+(def ^:private okp-x25519-spki-prefix
+  (byte-array [48 42 48 5 6 3 43 101 110 3 33 0]))
+;; RFC 8410 PKCS#8 PrivateKeyInfo prefixes for the same OIDs. They encode the
+;; version, algorithm identifier, and an OCTET STRING containing a 32-byte seed.
+(def ^:private okp-ed25519-pkcs8-prefix
+  (byte-array [48 46 2 1 0 48 5 6 3 43 101 112 4 34 4 32]))
+(def ^:private okp-x25519-pkcs8-prefix
+  (byte-array [48 46 2 1 0 48 5 6 3 43 101 110 4 34 4 32]))
 
 (def ^:private alg-names
   {:rs256 "RS256"
@@ -268,6 +284,92 @@
                         e
                         {:alias alias}))))))
 
+(defn to-java-keys
+  "Converts one JWK or a collection of JWK inputs to Java security keys."
+  [jwk-or-jwks]
+  (try
+    (let [jwks (mapv parse (if (coll? jwk-or-jwks) jwk-or-jwks [jwk-or-jwks]))]
+      (vec (mapcat (fn [^JWK jwk]
+                     (let [converted (KeyConverter/toJavaKeys ^List (java-list [jwk]))]
+                       (if (seq converted)
+                         converted
+                         (cond
+                           (= KeyType/OKP (.getKeyType jwk))
+                           (let [^OctetKeyPair key (.toOctetKeyPair jwk)
+                                 curve (.getName (.getCurve key))
+                                 factory (KeyFactory/getInstance curve)
+                                 prefix (if (= "Ed25519" curve)
+                                          okp-ed25519-spki-prefix
+                                          okp-x25519-spki-prefix)
+                                 public-key (.generatePublic factory
+                                                              (X509EncodedKeySpec.
+                                                               (byte-array (concat prefix (.decode (.getX key))))))]
+                             (if (.isPrivate jwk)
+                               (let [private-prefix (if (= "Ed25519" curve)
+                                                      okp-ed25519-pkcs8-prefix
+                                                      okp-x25519-pkcs8-prefix)
+                                     private-key (.generatePrivate factory
+                                                                    (PKCS8EncodedKeySpec.
+                                                                     (byte-array (concat private-prefix
+                                                                                         (.decode (.getD key))))))]
+                                 [public-key private-key])
+                               [public-key]))
+                           :else []))))
+                   jwks)))
+    (catch java.security.NoSuchAlgorithmException e
+      (throw (jose-ex :key-import-failure "JDK does not support JWK key algorithm" e
+                      {:algorithm (.getMessage e)})))
+    (catch RuntimeException e
+      (throw (jose-ex :key-import-failure "Failed to convert JWK to Java key" e {})))))
+
+(defn to-java-private-key
+  "Converts one private JWK input to its private Java security key."
+  ^PrivateKey [jwk]
+  (or (some #(when (instance? PrivateKey %) %) (to-java-keys [jwk]))
+      (throw (jose-ex :key-import-failure "JWK has no private Java key" nil {}))))
+
+(defn keystore->jwks
+  "Loads all private key entries from a key store using per-alias passwords."
+  ^JWKSet [^KeyStore keystore passwords]
+  (let [lookup (cond
+                 (map? passwords) (fn [alias] (get passwords alias))
+                 (ifn? passwords) passwords
+                 :else (invalid-option! :passwords))
+        password-chars (fn [password]
+                         (cond
+                           (nil? password) nil
+                           (string? password) (.toCharArray ^String password)
+                           (= (class password) (Class/forName "[C")) password
+                           :else (invalid-option! :passwords)))
+        password-lookup (reify PasswordLookup
+                          (lookupPassword [_ alias]
+                            (password-chars (lookup alias))))]
+    (try
+      (let [aliases (filter #(.isKeyEntry keystore ^String %)
+                            (enumeration-seq (.aliases keystore)))]
+        (let [loaded-entries
+              (mapv (fn [alias]
+                      (try
+                        (JWK/load keystore alias ^chars (password-chars (lookup alias)))
+                        (catch KeyStoreException e
+                          (throw (jose-ex :key-import-failure
+                                          "Failed to import key store entry"
+                                          e
+                                          {:alias alias})))
+                        (catch JOSEException e
+                          (throw (jose-ex :key-import-failure
+                                          "Failed to import key store entry"
+                                          e
+                                          {:alias alias})))))
+                    aliases)
+              loaded (JWKSet/load keystore password-lookup)
+              key-entry-count (count aliases)]
+          (if (= key-entry-count (.size loaded))
+            loaded
+            (JWKSet. ^List (java-list loaded-entries)))))
+      (catch KeyStoreException e
+        (throw (jose-ex :key-import-failure "Failed to import key store" e {}))))))
+
 (defn ->map
   "Returns the complete JWK JSON representation as a Clojure map."
   [jwk]
@@ -386,6 +488,19 @@
   "Returns the JWK X.509 certificate chain as Base64 strings, or nil."
   [jwk]
   (some->> (.getX509CertChain ^JWK (parse jwk)) (mapv str)))
+
+(defn x509-certificates
+  "Returns the JWK X.509 certificate chain as X509Certificate objects, or nil."
+  [jwk]
+  (let [^JWK jwk (parse jwk)]
+    (when (.getX509CertChain jwk)
+      (try
+        (vec (.getParsedX509CertChain jwk))
+        (catch RuntimeException e
+          (throw (jose-ex :parse-failure
+                          "Failed to parse JWK X.509 certificate chain"
+                          e
+                          {})))))))
 
 (defn x509-cert-thumbprint
   "Returns the JWK X.509 certificate SHA-1 thumbprint as a string, or nil."
