@@ -3,6 +3,7 @@
   ["Getting Started" {:file "doc/getting-started.md"}]
   ["Keys and JWK Sets" {:file "doc/keys.md"}]
   ["Certificates, JCA keys, and key stores" {:file "doc/certificates.md"}]
+  ["Providers and crypto options" {:file "doc/providers.md"}]
   ["JWT: Signed, Encrypted, Nested" {:file "doc/jwt.md"}]
   ["Verifying with Remote JWKS" {:file "doc/jwks.md"}]
   ["Minting JWS" {:file "doc/minting.md"}]
