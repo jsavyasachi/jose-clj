@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] - 2026-08-28
+
+### Fixed
+
+- Fixed OKP-to-Java-key conversion on JDK 11: Ed25519 and X25519 algorithms now reported `:key-import-failure` with the algorithm and required JDK instead of raising `NoSuchAlgorithmException`.
+- Corrected the documented JDK support: the library requires JDK 11, while OKP-to-JCA conversion requires JDK 15 or newer.
+- Cleared the clj-kondo warnings that had failed the lint gate.
+
 ## [0.7.0] - 2026-08-28
 
 ### Added
