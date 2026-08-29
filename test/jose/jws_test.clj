@@ -5,11 +5,12 @@
             [jose.jws :as jws])
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jose.crypto MACSigner MACVerifier)
-           (com.nimbusds.jose JWSHeader)
-           (com.nimbusds.jose.jwk Curve JWK OctetSequenceKey OctetSequenceKey$Builder)
+           (com.nimbusds.jose ActionRequiredForJWSCompletionException JWSHeader)
+           (com.nimbusds.jose.jwk Curve JWK RSAKey RSAKey$Builder OctetSequenceKey OctetSequenceKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator)
            (com.nimbusds.jose.util Base64URL JSONObjectUtils)
            (java.nio.charset StandardCharsets)
+           (java.security KeyPairGenerator Provider SecureRandom)
            (org.bouncycastle.jce.provider BouncyCastleProvider)))
 
 (def rfc-jws-payload
@@ -130,6 +131,46 @@
         header (JWSHeader/parse (Base64URL. (first (clojure.string/split compact #"\."))))]
     (is (= "Ed25519" (str (.getAlgorithm header))))
     (is (= "hello" (:payload (jws/verify key compact {:algs #{:ed25519}}))))))
+
+(deftest crypto-options
+  (let [key (jwk/generate :rsa)
+        compact (jws/sign key "hello" {:alg :rs256 :allow-weak-rsa-key? true
+                                        :provider :bouncy-castle})]
+    (is (= "hello" (:payload (jws/verify key compact {:alg :rs256
+                                                       :provider :bouncy-castle}))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jws/sign key "hello" {:unknown true})))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jws/verify key compact {:alg :rs256
+                                                               :unknown true})))))))
+
+(deftest weak-rsa-option
+  (let [generator (KeyPairGenerator/getInstance "RSA")
+        _ (.initialize generator 1024)
+        pair (.generateKeyPair generator)
+        builder (RSAKey$Builder. (.getPublic pair))
+        builder (.privateKey builder (.getPrivate pair))
+        key (.build builder)]
+    (is (= :sign-failure
+           (:jose/error (thrown-data #(jws/sign key "weak" {:alg :rs256})))))
+    (is (string? (jws/sign key "weak" {:alg :rs256 :allow-weak-rsa-key? true})))))
+
+(deftest deferred-signing-round-trips
+  (doseq [[kty opts alg] [[:rsa {:size 2048} :rs256]
+                          [:ec {:curve :p-256} :es256]]]
+    (let [key (jwk/generate kty opts)
+          deferred (jws/sign key "deferred" {:alg alg
+                                               :user-authentication-required? true})]
+      (is (instance? java.security.Signature (:signature deferred)))
+      (let [compact ((:complete deferred))]
+        (is (= "deferred" (:payload (jws/verify key compact {:alg alg}))))))))
+
+(deftest secure-random-and-provider-are-observable
+  (let [key (jwk/generate :rsa)
+        provider (proxy [Provider] ["empty" 1.0 ""])]
+    (is (= :sign-failure
+           (:jose/error (thrown-data #(jws/sign key "provider" {:alg :rs256
+                                                                  :provider provider})))))))
 
 (deftest json-header-disjointness
   (let [key (jwk/generate :oct {:size 256 :kid "a"})

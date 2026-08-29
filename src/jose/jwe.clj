@@ -2,7 +2,7 @@
   (:require [clojure.string :as str]
             [jose.jwk :as jwk])
   (:import (com.nimbusds.jose CompressionAlgorithm EncryptionMethod JOSEException JOSEObjectType
-                             JWEAlgorithm JWEDecrypter JWEEncrypter JWEHeader JWEHeader$Builder
+                             JWEAlgorithm JWEDecrypter JWEEncrypter JWEProvider JWEHeader JWEHeader$Builder
                              JWEObject JWEObjectJSON JWEObjectJSON$Recipient KeyLengthException Payload
                              UnprotectedHeader UnprotectedHeader$Builder)
            (com.nimbusds.jose.crypto AESDecrypter AESEncrypter DirectDecrypter DirectEncrypter
@@ -11,12 +11,15 @@
                                       MultiDecrypter MultiEncrypter PasswordBasedDecrypter
                                       PasswordBasedEncrypter RSADecrypter RSAEncrypter X25519Decrypter
                                       X25519Encrypter)
+           (com.nimbusds.jose.crypto.opts AllowWeakRSAKey CipherMode MaxCompressedCipherTextLength)
+           (com.nimbusds.jose.jca JWEJCAContext)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
            (com.nimbusds.jose.util Base64 Base64URL)
            (java.net URI)
            (java.nio.charset StandardCharsets)
            (java.text ParseException)
-           (java.util Arrays HashMap List Map)))
+           (java.security Provider SecureRandom)
+           (java.util Arrays HashMap HashSet List Map Set)))
 
 (set! *warn-on-reflection* true)
 
@@ -24,8 +27,13 @@
   #{:jku :jwk :x5u :x5c :x5t :x5t#S256 :typ :cty :crit :zip})
 
 (def ^:private encrypt-options
-  (into #{:alg :enc :kid :headers :salt-length :iteration-count}
+  (into #{:alg :enc :kid :headers :salt-length :iteration-count :provider
+          :secure-random :key-encryption-provider :content-encryption-provider :mac-provider
+          :cipher-mode}
         registered-header-options))
+(def ^:private decrypt-options
+  #{:provider :secure-random :key-encryption-provider :content-encryption-provider :mac-provider
+    :allow-weak-rsa-key? :cipher-mode :max-compressed-length})
 
 (def ^:private alg-names
   {:rsa-oaep-256 "RSA-OAEP-256"
@@ -86,6 +94,52 @@
     (cond
       (= :rsa1-5 option) (invalid-rsa1-5!)
       (not (contains? encrypt-options option)) (invalid-option! option))))
+
+(defn- validate-decrypt-options!
+  [opts]
+  (doseq [option (keys opts)]
+    (when-not (contains? decrypt-options option)
+      (invalid-option! option))))
+
+(defn- provider
+  ^Provider [value]
+  (cond
+    (instance? Provider value) value
+    (= :bouncy-castle value) (try (com.nimbusds.jose.crypto.bc.BouncyCastleProviderSingleton/getInstance)
+                                  (catch LinkageError e (throw (jose-ex :missing-optional-dep "Missing optional Bouncy Castle dependency" e {:dep "org.bouncycastle/bcprov-jdk18on"}))))
+    (= :bouncy-castle-fips value) (try (com.nimbusds.jose.crypto.bc.BouncyCastleFIPSProviderSingleton/getInstance)
+                                      (catch LinkageError e (throw (jose-ex :missing-optional-dep "Missing optional Bouncy Castle FIPS dependency" e {:dep "org.bouncycastle/bc-fips"}))))
+    :else (invalid-option! :provider)))
+
+(defn- configure-context!
+  [object opts]
+  (let [^JWEJCAContext context (.getJCAContext ^JWEProvider object)]
+    (when (contains? opts :provider) (.setProvider context (provider (:provider opts))))
+    (when (contains? opts :secure-random) (.setSecureRandom context ^SecureRandom (:secure-random opts)))
+    (when (contains? opts :key-encryption-provider) (.setKeyEncryptionProvider context (provider (:key-encryption-provider opts))))
+    (when (contains? opts :content-encryption-provider) (.setContentEncryptionProvider context (provider (:content-encryption-provider opts))))
+    (when (contains? opts :mac-provider) (.setMACProvider context (provider (:mac-provider opts))))
+    object))
+
+(defn- decrypter-options
+  ^Set [opts]
+  (let [result (HashSet.)]
+    (when (:allow-weak-rsa-key? opts) (.add result (AllowWeakRSAKey/getInstance)))
+    (when (contains? opts :cipher-mode)
+      (.add result (case (:cipher-mode opts)
+                     :wrap-unwrap CipherMode/WRAP_UNWRAP
+                     :encrypt-decrypt CipherMode/ENCRYPT_DECRYPT
+                     (invalid-option! :cipher-mode))))
+    (when (contains? opts :max-compressed-length)
+      (.add result (MaxCompressedCipherTextLength. (int (:max-compressed-length opts)))))
+    result))
+
+(defn- rsa-decrypter-with-options
+  ^JWEDecrypter [^JWK key opts]
+  (let [constructor (.getConstructor RSADecrypter
+                                     (into-array Class [java.security.PrivateKey java.util.Set java.util.Set]))]
+    (.newInstance ^java.lang.reflect.Constructor constructor
+                  (object-array [(.toPrivateKey (.toRSAKey key)) #{} (decrypter-options opts)]))))
 
 (defn- algorithm
   ^JWEAlgorithm [alg]
@@ -184,10 +238,17 @@
   (or (jwk/public-jwk key) key))
 
 (defn- encrypter
-  ^JWEEncrypter [^JWK key]
+  ^JWEEncrypter [^JWK key opts]
   (let [key-type (.getKeyType key)]
     (cond
-      (= KeyType/RSA key-type) (RSAEncrypter. ^RSAKey (.toRSAKey (public-key key)))
+      (= KeyType/RSA key-type) (if (contains? opts :cipher-mode)
+                                 (RSAEncrypter. ^java.security.interfaces.RSAPublicKey (.toRSAPublicKey (.toRSAKey (public-key key)))
+                                                  nil
+                                                  #{(case (:cipher-mode opts)
+                                                       :wrap-unwrap CipherMode/WRAP_UNWRAP
+                                                       :encrypt-decrypt CipherMode/ENCRYPT_DECRYPT
+                                                       (invalid-option! :cipher-mode))})
+                                 (RSAEncrypter. ^RSAKey (.toRSAKey (public-key key))))
       (= KeyType/EC key-type) (ECDHEncrypter. ^ECKey (.toECKey (public-key key)))
       (= KeyType/OCT key-type) (AESEncrypter. ^OctetSequenceKey (.toOctetSequenceKey key))
       (= KeyType/OKP key-type) (let [okp (.toOctetKeyPair (public-key key))]
@@ -266,14 +327,16 @@
       :else (invalid-option! :key))))
 
 (defn- decrypter
-  ^JWEDecrypter [key ^JWEHeader header]
+  ^JWEDecrypter [key ^JWEHeader header opts]
   (let [alg (.getAlgorithm header)
         key-type (when (instance? JWK key) (.getKeyType ^JWK key))]
     (cond
       (instance? JWEDecrypter key) key
       (contains? pbes2-algs alg) (password-decrypter key)
       (contains? ecdh-1pu-algs alg) (ecdh-1pu-decrypter key)
-      (= KeyType/RSA key-type) (RSADecrypter. ^RSAKey (.toRSAKey ^JWK key))
+      (= KeyType/RSA key-type) (if (seq (decrypter-options opts))
+                                 (rsa-decrypter-with-options ^JWK key opts)
+                                 (RSADecrypter. ^RSAKey (.toRSAKey ^JWK key)))
       (= KeyType/EC key-type) (ECDHDecrypter. ^ECKey (.toECKey ^JWK key))
       (= KeyType/OKP key-type) (let [okp (.toOctetKeyPair ^JWK key)]
                                  (if (= Curve/X25519 (.getCurve okp))
@@ -341,7 +404,7 @@
     (contains? pbes2-algs alg) (password-encrypter key opts)
     (contains? ecdh-1pu-algs alg) (ecdh-1pu-encrypter key)
     (direct-encrypter? alg) (DirectEncrypter. ^OctetSequenceKey (.toOctetSequenceKey ^JWK key))
-    :else (encrypter key)))
+    :else (encrypter key opts)))
 
 (defn- key-length-exception?
   [^JOSEException e]
@@ -387,7 +450,7 @@
        (when kid
          (.keyID builder kid))
        (let [jwe (JWEObject. (.build builder) (->payload payload-value))]
-         (.encrypt jwe (build-encrypter key alg opts))
+         (.encrypt jwe (configure-context! (build-encrypter key alg opts) opts))
          (.serialize jwe)))
      (catch KeyLengthException e
        (throw (jose-ex :key-length "Invalid JWE key length" e {})))
@@ -398,17 +461,21 @@
 
 (defn decrypt
   "Decrypts a compact JWE and returns {:payload string :payload-bytes bytes :header map}."
-  [key compact]
-  (try
+  ([key compact] (decrypt key compact {}))
+  ([key compact opts]
+   (validate-decrypt-options! opts)
+   (try
     (let [jwe (jwe-object compact)
           ^JWEHeader header (.getHeader jwe)]
       (algorithm (.getAlgorithm header))
-      (.decrypt jwe (decrypter (if (or (contains? pbes2-algs (.getAlgorithm header))
+      (let [^JWEDecrypter object (decrypter (if (or (contains? pbes2-algs (.getAlgorithm header))
                                        (contains? ecdh-1pu-algs (.getAlgorithm header))
                                        (instance? JWEDecrypter key))
                                  key
                                  (jwk/parse key))
-                               header))
+                               header opts)]
+        (configure-context! object opts)
+        (.decrypt jwe object (decrypter-options opts)))
       (let [^Payload payload (.getPayload jwe)
             bytes (.toBytes payload)]
         {:payload (String. ^bytes bytes StandardCharsets/UTF_8)
@@ -417,7 +484,7 @@
     (catch KeyLengthException e
       (throw (jose-ex :key-length "Invalid JWE key length" e {})))
     (catch JOSEException e
-      (throw (jose-ex :decryption-failure "Failed to decrypt JWE" e {})))))
+      (throw (jose-ex :decryption-failure "Failed to decrypt JWE" e {}))))))
 
 (defn header
   "Returns the unverified compact JWE header as a Clojure map."
@@ -496,7 +563,7 @@
                                  (not special-key?))
                           (MultiEncrypter. (jwk/jwk-set (map #(multi-recipient-key % alg) keys)))
                           (build-encrypter parsed-first alg opts))]
-          (.encrypt object encrypter)
+          (.encrypt object (configure-context! encrypter opts))
           (if (= :flattened serialization)
             (.serializeFlattened object)
             (.serializeGeneral object))))
@@ -565,8 +632,10 @@
 
 (defn decrypt-json
   "Parses and decrypts flattened or general JWE JSON."
-  [key json]
-  (try
+  ([key json] (decrypt-json key json {}))
+  ([key json opts]
+   (validate-decrypt-options! opts)
+   (try
     (let [object (jwe-json-object json)
           header (.getHeader object)
           recipients (.getRecipients object)
@@ -579,8 +648,9 @@
           decrypter (if (< 1 (count recipients))
                       (MultiDecrypter. parsed-key)
                       (let [effective-header (effective-json-header object)]
-                        (decrypter-with-header (decrypter parsed-key effective-header)
+                        (decrypter-with-header (decrypter parsed-key effective-header opts)
                                                effective-header)))]
+      (configure-context! decrypter opts)
       (.decrypt object decrypter)
       (let [^Payload payload (.getPayload object)
             bytes (.toBytes payload)
@@ -594,4 +664,4 @@
     (catch KeyLengthException e
       (throw (jose-ex :key-length "Invalid JWE key length" e {})))
     (catch JOSEException e
-      (throw (jose-ex :decryption-failure "Failed to decrypt JWE JSON" e {})))))
+      (throw (jose-ex :decryption-failure "Failed to decrypt JWE JSON" e {}))))))

@@ -7,7 +7,8 @@
            (com.nimbusds.jose.crypto DirectDecrypter DirectEncrypter)
            (com.nimbusds.jose.jwk JWK OctetSequenceKey)
            (com.nimbusds.jose.util Base64URL)
-           (java.nio.charset StandardCharsets)))
+           (java.nio.charset StandardCharsets)
+           (java.security SecureRandom)))
 
 (def rfc-7516-rsa-jwk
   {:kty "RSA"
@@ -176,6 +177,38 @@
         decrypter (DirectDecrypter. ^OctetSequenceKey oct)
         compact (jwe/encrypt encrypter "provider-backed" {:alg :dir :enc :a256gcm})]
     (is (= "provider-backed" (:payload (jwe/decrypt decrypter compact))))))
+
+(deftest crypto-options
+  (let [key (jwk/generate :oct {:size 256})
+        compact (jwe/encrypt key (apply str (repeat 1000 "compressible"))
+                             {:alg :dir :enc :a256gcm :zip :def})]
+    (is (= :decryption-failure
+           (:jose/error (thrown-data #(jwe/decrypt key compact
+                                      {:max-compressed-length 10})))))
+    (is (= (apply str (repeat 1000 "compressible"))
+           (:payload (jwe/decrypt key compact {:max-compressed-length 2000}))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(jwe/decrypt key compact {:unknown true})))))))
+
+(deftest cipher-modes-round-trip
+  (let [key (jwk/generate :rsa)]
+    (doseq [mode [:wrap-unwrap :encrypt-decrypt]]
+      (let [compact (jwe/encrypt key "cipher mode" {:alg :rsa-oaep-256 :enc :a256gcm
+                                                      :cipher-mode mode})]
+        (is (= "cipher mode"
+               (:payload (jwe/decrypt key compact {:cipher-mode mode}))))))))
+
+(deftest secure-random-is-honoured
+  (let [calls (atom 0)
+        random (proxy [SecureRandom] []
+                 (nextBytes [bytes]
+                   (swap! calls inc)
+                   (java.util.Arrays/fill bytes (byte 7))))
+        key (jwk/generate :rsa)
+        compact (jwe/encrypt key "random" {:alg :rsa-oaep-256 :enc :a256gcm
+                                             :secure-random random})]
+    (is (pos? @calls))
+    (is (= "random" (:payload (jwe/decrypt key compact))))))
 
 (deftest registered-header-options-round-trip
   (let [key (jwk/generate :rsa)
