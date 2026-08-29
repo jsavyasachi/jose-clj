@@ -33,6 +33,15 @@ URL with `jws-key-selector-from-jwk-set-url`. For one key, use
 `single-key-selector`. A `security-context` can supply JWKs per call:
 `(proc/process processor compact (proc/security-context [key]))`.
 
+To customize Nimbus's verification or decryption implementation, pass a
+`JWSVerifierFactory` as `:jws-verifier-factory` or a `JWEDecrypterFactory` as
+`:jwe-decrypter-factory`. Both default to Nimbus's
+`DefaultJWSVerifierFactory` and `DefaultJWEDecrypterFactory`; their accessors
+are `jws-verifier-factory` and `jwe-decrypter-factory`. These factories expose
+JCA contexts for selecting a specific security provider. Supplying either
+factory also marks that processing side as configured, but a key selector or
+algorithm policy is still needed for successful processing.
+
 `matcher` returns a predicate for JOSE objects or compact strings. Its
 criteria are `:classes` (such as `:jws` or `:jwe`), `:algorithms`, `:encryption-methods`, `:jwk-urls`,
 and `:key-ids`.
