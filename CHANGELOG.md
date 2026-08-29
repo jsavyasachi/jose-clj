@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-08-28
+
+### Added
+
+- Added `jose.mint` for minting JWS values with a signing key selected from a JWKS source and an optional custom signer factory.
+- Added `jose.proc` for generic JOSE processing, algorithm-family and single-key JWS selectors, per-call JWK security contexts, matcher predicates, and custom verifier and decrypter factories.
+- Added X.509 certificate-chain parsing and rendering, JWK `x5c` conversion, parsed-certificate access, JWK-to-Java-key conversion including OKP keys, and whole-key-store loading with per-alias passwords in `jose.jwk` and `jose.pem`.
+- Added JCA provider selection, BouncyCastle and BouncyCastle-FIPS singletons, and the `:secure-random`, `:max-compressed-length`, `:cipher-mode`, and `:allow-weak-rsa-key?` options.
+- Added deferred JWS signing with `:user-authentication-required?`, returning the initialized `java.security.Signature` and a completion function.
+- Added the fully specified `Ed25519` JWS algorithm alongside `EdDSA`.
+- Documented the library's scope and the known Nimbus 10.9.1 limitation that EdDSA verification through a JWKS source does not resolve keys.
+
+### Fixed
+
+- Fixed JWS JSON serialization to enforce RFC 7515 section 7.2.1 header disjointness: `sign-json` refuses overlapping protected and unprotected headers, and `verify-json` rejects them in every signature of a general serialization.
+
 ## [0.6.1] - 2026-08-24
 
 ### Fixed
