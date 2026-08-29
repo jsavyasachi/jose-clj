@@ -27,6 +27,29 @@ algorithms (EdDSA, ECDH-ES). jose-clj wraps the maintained Nimbus engine rather
 than reimplementing cryptography. The cryptographic primitives are as correct as
 Nimbus, and they stay correct as Nimbus is updated.
 
+## Scope
+
+jose-clj covers the complete JOSE and JWT operation surface implemented by
+Nimbus: JWS, JWE, JWK and JWK sets, JWKS sources, and JWT signing, encryption,
+nesting, and processing.
+
+SPI interfaces, abstract base classes, factory types, and JCA plumbing are
+covered seams, reached through idiomatic options rather than one-to-one
+wrappers.
+
+Deprecated Nimbus surface, including `RSA1_5`, `RSA-OAEP` with SHA-1, and the
+`*_DEPRECATED` encryption methods, is excluded because Nimbus marks it
+obsolete. `Ed448`, `X448`, and the `P_256K` curve alias are excluded because
+Nimbus defines constants for them but ships no implementation. Creating
+unsecured plain JWTs (`alg: none`) is excluded because jose-clj parses and
+detects them (`jose.jwt/parse-type` returns `:plain`) and every processor
+rejects them, but jose-clj will not produce one.
+
+Known upstream limitation: Nimbus 10.9.1's `JWSVerificationKeySelector`
+returns no keys for a valid Ed25519 JWK from a JWKS source. This affects
+`jose.jws/verify-with-jwks`, `jose.jwt/build-processor`, and `jose.proc`; pass
+the key directly or provide a custom key selector.
+
 ## Installation
 
 deps.edn:
@@ -116,6 +139,59 @@ uses BouncyCastle PKIX to parse PEM. Add
 `org.bouncycastle/bcpkix-jdk18on` at runtime when you parse PEM. EC private-key
 export includes the matching public PEM block, so Nimbus can rebuild the full EC
 JWK from PKCS#8 private material.
+
+### Minting from a JWKS (`jose.mint`)
+
+```clojure
+(require '[jose.jwks :as jwks]
+         '[jose.mint :as mint]
+         '[jose.jws :as jws])
+
+(def source (jwks/local-source [k]))
+(def compact (mint/mint (mint/minter source) "hello"
+                        {:alg :rs256 :kid "sig-1"}))
+(jws/verify-with-jwks source compact {:alg :rs256})
+;; => {:payload "hello", :payload-bytes ..., :header ...}
+```
+
+`jose.mint` lets Nimbus select the signing JWK from a local or remote source
+for each requested header.
+
+### Generic JOSE processing (`jose.proc`)
+
+```clojure
+(require '[jose.jws :as jws]
+         '[jose.jwks :as jwks]
+         '[jose.proc :as proc])
+
+(def source (jwks/local-source [k]))
+(def compact (jws/sign k "arbitrary payload" {:alg :rs256 :kid "sig-1"}))
+(def processor (proc/processor source {:jws-algs #{:rs256}}))
+(proc/process processor compact)
+;; => {:payload "arbitrary payload", :payload-bytes ...}
+```
+
+`jose.proc` processes signed or encrypted JOSE payloads without treating the
+payload as JWT claims. Its policy options select permitted algorithms and JOSE
+types; unsecured plain objects are rejected.
+
+### Certificate chains and JCA keys (`jose.jwk`, `jose.pem`)
+
+```clojure
+(def chain (pem/pem->certificates certificate-pem))
+(def x5c (pem/pem->x5c certificate-pem))
+(pem/certificates->pem chain)
+(pem/x5c->certificates x5c)
+
+(jwk/x509-cert-chain (jwk/certificate->jwk (first chain)))
+(jwk/x509-certificates (jwk/certificate->jwk (first chain)))
+(jwk/to-java-keys k)
+(jwk/to-java-private-key k)
+```
+
+Here `certificate-pem` is a PEM certificate chain supplied by the application.
+The certificate helpers preserve chain order; the JCA helpers convert one JWK
+or a collection of JWKs to Java keys.
 
 ### Signing (`jose.jws`)
 
