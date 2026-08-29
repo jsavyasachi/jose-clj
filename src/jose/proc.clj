@@ -12,7 +12,10 @@
                                     DefaultJOSEProcessor JWEDecryptionKeySelector JWEKeySelector
                                     JWKSecurityContext JOSEMatcher JWSAlgorithmFamilyJWSKeySelector
                                     JWSKeySelector JWSVerificationKeySelector SecurityContext
-                                    SingleKeyJWSKeySelector)
+                                    SingleKeyJWSKeySelector JWEDecrypterFactory
+                                    JWSVerifierFactory)
+           (com.nimbusds.jose.crypto.factories DefaultJWEDecrypterFactory
+                                               DefaultJWSVerifierFactory)
            (jose.jwks Source)
            (java.net URI URL)
            (java.nio.charset StandardCharsets)
@@ -23,11 +26,14 @@
 (set! *warn-on-reflection* true)
 
 (defrecord Processor [^ConfigurableJOSEProcessor processor jws-algs jwe-algs encs typ
-                      jws-configured? jwe-configured? jws-policy?])
+                      jws-configured? jwe-configured? jws-policy?
+                      ^JWSVerifierFactory jws-verifier-factory
+                      ^JWEDecrypterFactory jwe-decrypter-factory])
 
 (def ^:private processor-options
   #{:jws-alg :jws-algs :jwe-alg :jwe-algs :jwe-enc :jwe-encs :typ
-    :jws-key-selector :jwe-key-selector})
+    :jws-key-selector :jwe-key-selector :jws-verifier-factory
+    :jwe-decrypter-factory})
 
 (def ^:private family-values
   {:hmac-sha JWSAlgorithm$Family/HMAC_SHA
@@ -199,10 +205,12 @@
   ^Processor [source-value opts]
   (validate-options! opts)
   (let [jws-configured? (or (contains? opts :jws-alg) (contains? opts :jws-algs)
-                            (contains? opts :jws-key-selector))
+                            (contains? opts :jws-key-selector)
+                            (contains? opts :jws-verifier-factory))
         jwe-configured? (or (contains? opts :jwe-alg) (contains? opts :jwe-algs)
                             (contains? opts :jwe-enc) (contains? opts :jwe-encs)
-                            (contains? opts :jwe-key-selector))
+                            (contains? opts :jwe-key-selector)
+                            (contains? opts :jwe-decrypter-factory))
         _ (when-not (or jws-configured? jwe-configured?) (invalid-option! :policy))
         jws-values (when (or (contains? opts :jws-alg) (contains? opts :jws-algs))
                       (values opts :jws-alg :jws-algs :jws-algs))
@@ -210,21 +218,35 @@
                      (values opts :jwe-alg :jwe-algs :jwe-algs))
         enc-values (when (or (contains? opts :jwe-enc) (contains? opts :jwe-encs))
                       (values opts :jwe-enc :jwe-encs :jwe-encs))
-        _ (when (and jwe-configured?
+        _ (when (and (or jwe-values enc-values)
                      (or (nil? jwe-values) (nil? enc-values)))
             (invalid-option! (if (nil? jwe-values) :jwe-algs :jwe-encs)))
         jws-algs (when jws-values (set (map jws-algorithm jws-values)))
         jwe-algs (when jwe-values (set (map jwe-algorithm jwe-values)))
         encs (when enc-values (set (map encryption-method enc-values)))
+        ^JWSVerifierFactory jws-verifier-factory
+        (if (contains? opts :jws-verifier-factory)
+          (:jws-verifier-factory opts)
+          (DefaultJWSVerifierFactory.))
+        ^JWEDecrypterFactory jwe-decrypter-factory
+        (if (contains? opts :jwe-decrypter-factory)
+          (:jwe-decrypter-factory opts)
+          (DefaultJWEDecrypterFactory.))
         processor (DefaultJOSEProcessor.)]
-    (when jws-configured?
+    (when-not (instance? JWSVerifierFactory jws-verifier-factory)
+      (invalid-option! :jws-verifier-factory))
+    (when-not (instance? JWEDecrypterFactory jwe-decrypter-factory)
+      (invalid-option! :jwe-decrypter-factory))
+    (.setJWSVerifierFactory processor jws-verifier-factory)
+    (.setJWEDecrypterFactory processor jwe-decrypter-factory)
+    (when (and jws-configured? (or (:jws-key-selector opts) jws-algs))
       (if-let [selector (:jws-key-selector opts)]
         (if (instance? JWSKeySelector selector)
           (.setJWSKeySelector processor selector)
           (invalid-option! :jws-key-selector))
         (.setJWSKeySelector processor
                             (JWSVerificationKeySelector. ^Set jws-algs (context-source (source source-value))))))
-    (when jwe-configured?
+    (when (and jwe-configured? (or (:jwe-key-selector opts) (and jwe-algs encs)))
       (if-let [selector (:jwe-key-selector opts)]
         (if (instance? JWEKeySelector selector)
           (.setJWEKeySelector processor selector)
@@ -237,7 +259,18 @@
         (.setJWETypeVerifier processor verifier)))
     (->Processor processor jws-algs jwe-algs encs (:typ opts)
                  jws-configured? jwe-configured?
-                 (and jws-configured? (not (:jws-key-selector opts))))))
+                 (and jws-configured? (not (:jws-key-selector opts)))
+                 jws-verifier-factory jwe-decrypter-factory)))
+
+(defn jws-verifier-factory
+  "Returns the Nimbus verifier factory configured on a processor."
+  ^JWSVerifierFactory [^Processor processor]
+  (:jws-verifier-factory processor))
+
+(defn jwe-decrypter-factory
+  "Returns the Nimbus decrypter factory configured on a processor."
+  ^JWEDecrypterFactory [^Processor processor]
+  (:jwe-decrypter-factory processor))
 
 (defn- payload-map [^Payload payload]
   (let [^bytes bytes (.toBytes payload)]

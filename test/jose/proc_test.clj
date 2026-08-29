@@ -7,10 +7,16 @@
             [jose.proc :as proc])
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jose JWEObject JWSAlgorithm JWSHeader JWSObject)
+           (com.nimbusds.jose.crypto.factories DefaultJWEDecrypterFactory
+                                               DefaultJWSVerifierFactory)
            (com.nimbusds.jose.jwk Curve JWK JWKSet)
            (com.nimbusds.jose.jwk.gen OctetKeyPairGenerator)
            (com.nimbusds.jose.jwk.source ImmutableJWKSet)
-           (com.nimbusds.jose.proc JWSVerificationKeySelector SimpleSecurityContext)
+           (com.nimbusds.jose.proc JWEDecrypterFactory JWSVerificationKeySelector
+                                   JWSVerifierFactory SimpleSecurityContext)
+           (com.nimbusds.jose JWEDecrypter JWSVerifier JWEAlgorithm EncryptionMethod
+                               JWEHeader)
+           (com.nimbusds.jose.jca JCAContext)
            (java.net URI)))
 
 (defn thrown-data [f]
@@ -22,6 +28,37 @@
 
 (defn policy [source]
   {:jws-algs #{:hs256} :jwe-algs #{:dir} :jwe-encs #{:a256gcm}})
+
+(defn proc-accessor
+  [name processor]
+  (when-let [accessor (ns-resolve 'jose.proc name)]
+    (accessor processor)))
+
+(defn counting-verifier-factory
+  [calls]
+  (let [delegate (DefaultJWSVerifierFactory.)]
+    (reify JWSVerifierFactory
+      (^JWSVerifier createJWSVerifier [_ ^JWSHeader header ^java.security.Key key]
+        (swap! calls inc)
+        (.createJWSVerifier delegate header key))
+      (^JCAContext getJCAContext [_]
+        (.getJCAContext delegate))
+      (^java.util.Set supportedJWSAlgorithms [_]
+        (.supportedJWSAlgorithms delegate)))))
+
+(defn counting-decrypter-factory
+  [calls]
+  (let [delegate (DefaultJWEDecrypterFactory.)]
+    (reify JWEDecrypterFactory
+      (^JWEDecrypter createJWEDecrypter [_ ^JWEHeader header ^java.security.Key key]
+        (swap! calls inc)
+        (.createJWEDecrypter delegate header key))
+      (^JCAContext getJCAContext [_]
+        (.getJCAContext delegate))
+      (^java.util.Set supportedJWEAlgorithms [_]
+        (.supportedJWEAlgorithms delegate))
+      (^java.util.Set supportedEncryptionMethods [_]
+        (.supportedEncryptionMethods delegate)))))
 
 (deftest processes-arbitrary-signed-payloads
   (let [key (jwk/generate :oct {:size 256 :kid "sig"})
@@ -37,6 +74,59 @@
         processor (proc/processor source (policy source))
         compact (jwe/encrypt key "secret text" {:alg :dir})]
     (is (= "secret text" (:payload (proc/process processor compact))))))
+
+(deftest uses-custom-verifier-factory
+  (let [calls (atom 0)
+        factory (counting-verifier-factory calls)
+        key (jwk/generate :oct {:size 256 :kid "sig"})
+        processor (proc/processor (jwks/local-source [key])
+                                  (assoc (policy nil) :jws-verifier-factory factory))
+        compact (jws/sign key "custom verifier")]
+    (is (= factory (proc-accessor 'jws-verifier-factory processor)))
+    (is (= "custom verifier" (:payload (proc/process processor compact))))
+    (is (= 1 @calls))))
+
+(deftest uses-custom-decrypter-factory
+  (let [calls (atom 0)
+        factory (counting-decrypter-factory calls)
+        key (jwk/generate :oct {:size 256 :kid "enc"})
+        processor (proc/processor (jwks/local-source [key])
+                                  (assoc (policy nil) :jwe-decrypter-factory factory))
+        compact (jwe/encrypt key "custom decrypter" {:alg :dir})]
+    (is (= factory (proc-accessor 'jwe-decrypter-factory processor)))
+    (is (= "custom decrypter" (:payload (proc/process processor compact))))
+    (is (= 1 @calls))))
+
+(deftest rejects-non-factory-options
+  (let [source (jwks/local-source [(jwk/generate :oct {:size 256})])]
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(proc/processor source
+                                                       {:jws-algs #{:hs256}
+                                                        :jws-verifier-factory :nope})))))
+    (is (= :invalid-option
+           (:jose/error (thrown-data #(proc/processor source
+                                                       {:jwe-algs #{:dir}
+                                                        :jwe-encs #{:a256gcm}
+                                                        :jwe-decrypter-factory :nope})))))))
+
+(deftest default-factories-are-installed
+  (let [processor (proc/processor (jwks/local-source [(jwk/generate :oct {:size 256})])
+                                  {:jws-algs #{:hs256}})]
+    (is (instance? DefaultJWSVerifierFactory
+                   (proc-accessor 'jws-verifier-factory processor)))
+    (is (instance? DefaultJWEDecrypterFactory
+                   (proc-accessor 'jwe-decrypter-factory processor)))))
+
+(deftest factory-options-configure-their-processing-sides
+  (let [source (jwks/local-source [])
+        jws-processor (proc/processor source
+                                      {:jws-verifier-factory (DefaultJWSVerifierFactory.)})
+        jwe-processor (proc/processor source
+                                      {:jwe-decrypter-factory (DefaultJWEDecrypterFactory.)})]
+    (is (:jws-configured? jws-processor))
+    (is (not (:jwe-configured? jws-processor)))
+    (is (:jwe-configured? jwe-processor))
+    (is (not (:jws-configured? jwe-processor)))))
 
 (deftest processor-rejects-unsafe-or-mismatched-input
   (let [key (jwk/generate :oct {:size 512 :kid "sig"})
