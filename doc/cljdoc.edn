@@ -2,6 +2,9 @@
  [["Readme" {:file "README.md"}]
   ["Getting Started" {:file "doc/getting-started.md"}]
   ["Keys and JWK Sets" {:file "doc/keys.md"}]
+  ["Certificates, JCA keys, and key stores" {:file "doc/certificates.md"}]
   ["JWT: Signed, Encrypted, Nested" {:file "doc/jwt.md"}]
   ["Verifying with Remote JWKS" {:file "doc/jwks.md"}]
+  ["Minting JWS" {:file "doc/minting.md"}]
+  ["Generic JOSE processing" {:file "doc/processing.md"}]
   ["Migrating from buddy-sign" {:file "doc/migrating-from-buddy-sign.md"}]]}
