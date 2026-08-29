@@ -3,16 +3,18 @@
             [clojure.set :as set]
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
-  (:import (com.nimbusds.jose JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder
+  (:import (com.nimbusds.jose ActionRequiredForJWSCompletionException JOSEException JOSEObjectType JWSAlgorithm JWSHeader JWSHeader$Builder
                              JWSObject JWSProvider JWSSigner
                              JWSVerifier Payload UnprotectedHeader UnprotectedHeader$Builder)
            (com.nimbusds.jose.crypto ECDSASigner ECDSAVerifier Ed25519Signer Ed25519Verifier
                                       MACSigner MACVerifier RSASSASigner RSASSAVerifier)
+           (com.nimbusds.jose.crypto.opts AllowWeakRSAKey UserAuthenticationRequired)
            (com.nimbusds.jose.jwk Curve ECKey JWK KeyType OctetKeyPair OctetSequenceKey RSAKey)
            (com.nimbusds.jose.util Base64 Base64URL JSONObjectUtils)
            (java.net URI)
            (java.nio.charset StandardCharsets)
            (java.security Provider Security)
+           (java.security SecureRandom)
            (java.text ParseException)
            (java.util HashSet List Map)))
 
@@ -22,8 +24,10 @@
   #{:jku :jwk :x5u :x5c :x5t :x5t#S256 :typ :cty :crit})
 
 (def ^:private sign-options
-  (into #{:alg :kid :headers :detached? :b64?} registered-header-options))
-(def ^:private verify-options #{:alg :algs :typ :cty :crit})
+  (into #{:alg :kid :headers :detached? :b64? :provider :secure-random
+          :allow-weak-rsa-key? :user-authentication-required?}
+        registered-header-options))
+(def ^:private verify-options #{:alg :algs :typ :cty :crit :provider :secure-random})
 
 (def ^:private alg-names
   {:hs256 "HS256"
@@ -192,6 +196,38 @@
         (catch ClassNotFoundException _
           nil))))
 
+(defn- provider
+  ^Provider [value]
+  (cond
+    (instance? Provider value) value
+    (= :bouncy-castle value) (try
+                               (com.nimbusds.jose.crypto.bc.BouncyCastleProviderSingleton/getInstance)
+                               (catch LinkageError e
+                                 (throw (jose-ex :missing-optional-dep
+                                                 "Missing optional Bouncy Castle dependency" e
+                                                 {:dep "org.bouncycastle/bcprov-jdk18on"}))))
+    (= :bouncy-castle-fips value) (try
+                                   (com.nimbusds.jose.crypto.bc.BouncyCastleFIPSProviderSingleton/getInstance)
+                                   (catch LinkageError e
+                                     (throw (jose-ex :missing-optional-dep
+                                                     "Missing optional Bouncy Castle FIPS dependency" e
+                                                     {:dep "org.bouncycastle/bc-fips"}))))
+    :else (invalid-option! :provider)))
+
+(defn- jws-options
+  ^java.util.Set [opts]
+  (let [result (HashSet.)]
+    (when (:allow-weak-rsa-key? opts) (.add result (AllowWeakRSAKey/getInstance)))
+    (when (:user-authentication-required? opts) (.add result (UserAuthenticationRequired/getInstance)))
+    result))
+
+(defn- configure-context!
+  [signer opts]
+  (let [context (.getJCAContext ^JWSProvider signer)]
+    (when (contains? opts :provider) (.setProvider context (provider (:provider opts))))
+    (when (contains? opts :secure-random) (.setSecureRandom context ^SecureRandom (:secure-random opts)))
+    signer))
+
 (defn- with-optional-ec-provider
   [provider ^ECKey key]
   (when (#{Curve/SECP256K1 Curve/P_256K} (.getCurve key))
@@ -200,13 +236,14 @@
   provider)
 
 (defn- signer
-  [^JWK key]
+  [^JWK key opts]
+  (let [options (jws-options opts)]
   (let [key-type (.getKeyType key)]
     (cond
-      (= KeyType/RSA key-type) (RSASSASigner. ^RSAKey (.toRSAKey key))
+      (= KeyType/RSA key-type) (RSASSASigner. ^RSAKey (.toRSAKey key) options)
       (= KeyType/EC key-type) (let [ec-key (.toECKey key)]
                                 (with-optional-ec-provider
-                                  (ECDSASigner. ^ECKey ec-key)
+                                  (ECDSASigner. ^ECKey ec-key options)
                                   ec-key))
       (= KeyType/OCT key-type) (MACSigner. ^OctetSequenceKey (.toOctetSequenceKey key))
       (= KeyType/OKP key-type) (try
@@ -216,7 +253,26 @@
                                                    "Missing optional Tink dependency"
                                                    e
                                                    {:dep "com.google.crypto.tink/tink"}))))
-      :else (invalid-option! :alg))))
+      :else (invalid-option! :alg)))))
+
+(defn- deferred-signing-result
+  [^JWSObject jws ^ActionRequiredForJWSCompletionException error]
+  (let [completion (.getCompletableJWSObjectSigning error)
+        ^JWSHeader header (.getHeader jws)
+        ^Payload payload (.getPayload jws)]
+    {:deferred? true
+     :signature (.getInitializedSignature completion)
+     :header (header-map header)
+     :payload (.toString payload)
+     :complete (fn []
+                 (try
+                   (str (.toBase64URL header) "."
+                        (if (.isBase64URLEncodePayload header)
+                          (.toBase64URL payload)
+                          (.toString payload))
+                        "." (.complete completion))
+                   (catch JOSEException e
+                     (throw (jose-ex :sign-failure "Failed to complete JWS signing" e {})))))}))
 
 (defn- public-key
   ^JWK [^JWK key]
@@ -334,10 +390,17 @@
        (when kid
          (.keyID builder kid))
        (let [jws (JWSObject. (.build builder) (->payload payload-value))]
-         (.sign jws (if supplied-signer? key (signer parsed-key)))
-         (.serialize jws (boolean (:detached? opts false)))))
+         (try
+           (.sign jws (configure-context! (if supplied-signer? key (signer parsed-key opts)) opts))
+           (.serialize jws (boolean (:detached? opts false)))
+           (catch ActionRequiredForJWSCompletionException e
+             (deferred-signing-result jws e)))))
      (catch JOSEException e
-       (throw (jose-ex :sign-failure "Failed to sign JWS" e {}))))))
+       (throw (jose-ex :sign-failure "Failed to sign JWS" e {})))
+     (catch RuntimeException e
+       (if (instance? clojure.lang.ExceptionInfo e)
+         (throw e)
+         (throw (jose-ex :sign-failure "Failed to sign JWS" e {})))))))
 
 (defn verify
   "Verifies a compact JWS and returns {:payload string :payload-bytes bytes :header map}.
@@ -355,7 +418,7 @@
        (validate-verification-policy! (.getHeader jws) opts)
        (when-not (.verify jws (if (instance? JWSVerifier key)
                                key
-                               (verifier (jwk/parse key))))
+                               (configure-context! (verifier (jwk/parse key)) opts)))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -378,7 +441,7 @@
        (validate-verification-policy! (.getHeader jws) opts)
        (when-not (.verify jws (if (instance? JWSVerifier key)
                                key
-                               (verifier (jwk/parse key))))
+                               (configure-context! (verifier (jwk/parse key)) opts)))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -476,7 +539,7 @@
       (validate-json-header-disjointness! header unprotected :sign)
       (let [payload-string (json-payload-string payload)
             object (JWSObject. header (Payload. ^String payload-string))]
-        (.sign object (signer key))
+        (.sign object (signer key {}))
         (cond-> {"protected" (.toString (.toBase64URL header))
                  "signature" (.toString (.getSignature object))}
           unprotected (assoc "header" (.toJSONObject unprotected)))))))
