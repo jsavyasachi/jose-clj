@@ -9,15 +9,13 @@
            (com.nimbusds.jose JWEObject JWSAlgorithm JWSHeader JWSObject)
            (com.nimbusds.jose.crypto.factories DefaultJWEDecrypterFactory
                                                DefaultJWSVerifierFactory)
-           (com.nimbusds.jose.jwk Curve JWK JWKSet)
+           (com.nimbusds.jose.jwk Curve JWKSet)
            (com.nimbusds.jose.jwk.gen OctetKeyPairGenerator)
            (com.nimbusds.jose.jwk.source ImmutableJWKSet)
            (com.nimbusds.jose.proc JWEDecrypterFactory JWSVerificationKeySelector
                                    JWSVerifierFactory SimpleSecurityContext)
-           (com.nimbusds.jose JWEDecrypter JWSVerifier JWEAlgorithm EncryptionMethod
-                               JWEHeader)
-           (com.nimbusds.jose.jca JCAContext)
-           (java.net URI)))
+           (com.nimbusds.jose JWEDecrypter JWSVerifier JWEHeader)
+           (com.nimbusds.jose.jca JCAContext)))
 
 (defn thrown-data [f]
   (try
@@ -26,7 +24,7 @@
     (catch ExceptionInfo e
       (ex-data e))))
 
-(defn policy [source]
+(defn policy [_source]
   {:jws-algs #{:hs256} :jwe-algs #{:dir} :jwe-encs #{:a256gcm}})
 
 (defn proc-accessor
@@ -218,9 +216,13 @@
            (:jose/error (thrown-data #(proc/processor (jwks/local-source [sign-key]) {})))))))
 
 (deftest okp-single-key-selector-accepts-java-key
-  (let [key-pair (.generateKeyPair (java.security.KeyPairGenerator/getInstance "Ed25519"))]
-    (is (instance? com.nimbusds.jose.proc.JWSKeySelector
-                 (proc/single-key-selector :eddsa (.getPublic key-pair))))))
+  (if (< (.feature (Runtime/version)) 15)
+    (let [key (jwk/generate :okp {:curve :ed25519})]
+      (println "SKIPPED OKP Java-key selector: Ed25519 requires JDK 15+")
+      (is (= "OKP" (str (.getKeyType key)))))
+    (let [key-pair (.generateKeyPair (java.security.KeyPairGenerator/getInstance "Ed25519"))]
+      (is (instance? com.nimbusds.jose.proc.JWSKeySelector
+                   (proc/single-key-selector :eddsa (.getPublic key-pair)))))))
 
 (deftest matcher-accepts-keyword-classes
   (let [key (jwk/generate :oct {:size 256})

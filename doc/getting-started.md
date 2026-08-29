@@ -16,6 +16,10 @@ Leiningen:
 
 jose-clj requires JDK 11 or newer.
 
+The library works on JDK 11 and newer, but converting OKP JWKs to Java
+security keys requires JDK 15 or newer because Ed25519 and X25519 were added
+to the JDK in JDK 15.
+
 Most algorithms run on the plain JDK. Two paths need optional dependencies:
 
 ```clojure

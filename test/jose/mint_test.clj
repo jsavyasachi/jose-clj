@@ -7,7 +7,7 @@
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jose JWSAlgorithm JWSSigner JOSEException KeySourceException)
            (com.nimbusds.jose.crypto.factories DefaultJWSSignerFactory)
-           (com.nimbusds.jose.jwk JWK JWKSet)
+           (com.nimbusds.jose.jwk JWK)
            (com.nimbusds.jose.jwk.source JWKSource)
            (com.nimbusds.jose.jwk JWKSelector)
            (com.nimbusds.jose.proc SecurityContext)

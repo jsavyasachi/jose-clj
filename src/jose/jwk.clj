@@ -4,7 +4,7 @@
            (com.nimbusds.jose.jwk Curve ECKey$Builder JWK JWKMatcher JWKSet
                                   KeyOperation KeyRevocation KeyRevocation$Reason
                                   KeyType KeyUse KeyConverter PasswordLookup
-                                  RSAKey ECKey OctetKeyPair OctetSequenceKey
+                                  OctetKeyPair
                                   OctetKeyPair$Builder OctetSequenceKey$Builder
                                   RSAKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator JWKGenerator
@@ -14,7 +14,7 @@
            (com.nimbusds.jose.util Base64 Base64URL)
            (java.io File IOException InputStream)
            (java.net URI)
-           (java.security Key KeyFactory KeyStore KeyStoreException PrivateKey Provider SecureRandom)
+           (java.security KeyFactory KeyStore KeyStoreException PrivateKey Provider SecureRandom)
            (java.security.cert X509Certificate)
            (java.security.spec PKCS8EncodedKeySpec X509EncodedKeySpec)
            (java.text ParseException)
@@ -284,6 +284,17 @@
                         e
                         {:alias alias}))))))
 
+(defn- jca-key-factory
+  ^KeyFactory [^String algorithm]
+  (try
+    (KeyFactory/getInstance algorithm)
+    (catch java.security.NoSuchAlgorithmException e
+      (throw (jose-ex :key-import-failure
+                      "JDK does not support JWK key algorithm; OKP JCA conversion requires JDK 15+"
+                      e
+                      {:algorithm algorithm
+                       :required-jdk 15})))))
+
 (defn to-java-keys
   "Converts one JWK or a collection of JWK inputs to Java security keys."
   [jwk-or-jwks]
@@ -297,10 +308,10 @@
                            (= KeyType/OKP (.getKeyType jwk))
                            (let [^OctetKeyPair key (.toOctetKeyPair jwk)
                                  curve (.getName (.getCurve key))
-                                 factory (KeyFactory/getInstance curve)
                                  prefix (if (= "Ed25519" curve)
                                           okp-ed25519-spki-prefix
                                           okp-x25519-spki-prefix)
+                                 factory (jca-key-factory curve)
                                  public-key (.generatePublic factory
                                                               (X509EncodedKeySpec.
                                                                (byte-array (concat prefix (.decode (.getX key))))))]
@@ -317,8 +328,13 @@
                            :else []))))
                    jwks)))
     (catch java.security.NoSuchAlgorithmException e
-      (throw (jose-ex :key-import-failure "JDK does not support JWK key algorithm" e
-                      {:algorithm (.getMessage e)})))
+      (throw (jose-ex :key-import-failure
+                      "JDK does not support JWK key algorithm; OKP JCA conversion requires JDK 15+"
+                      e
+                      {:algorithm (.getMessage e)
+                       :required-jdk 15})))
+    (catch clojure.lang.ExceptionInfo e
+      (throw e))
     (catch RuntimeException e
       (throw (jose-ex :key-import-failure "Failed to convert JWK to Java key" e {})))))
 
@@ -346,8 +362,8 @@
                             (password-chars (lookup alias))))]
     (try
       (let [aliases (filter #(.isKeyEntry keystore ^String %)
-                            (enumeration-seq (.aliases keystore)))]
-        (let [loaded-entries
+                            (enumeration-seq (.aliases keystore)))
+            loaded-entries
               (mapv (fn [alias]
                       (try
                         (JWK/load keystore alias ^chars (password-chars (lookup alias)))
@@ -366,7 +382,7 @@
               key-entry-count (count aliases)]
           (if (= key-entry-count (.size loaded))
             loaded
-            (JWKSet. ^List (java-list loaded-entries)))))
+            (JWKSet. ^List (java-list loaded-entries))))
       (catch KeyStoreException e
         (throw (jose-ex :key-import-failure "Failed to import key store" e {}))))))
 

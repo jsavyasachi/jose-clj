@@ -68,7 +68,9 @@ Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. jose-clj is a thin wrapper, so you
 get Nimbus updates, including security fixes, when you bump that one dependency.
 The weekly antq workflow proposes bumps automatically.
 
-JDK 11+. Some paths need an optional engine on the classpath:
+JDK 11+. The library works on JDK 11 and newer; converting OKP JWKs to Java
+security keys requires JDK 15+ because that is when Ed25519 and X25519 were
+added to the JDK. Some paths need an optional engine on the classpath:
 
 - EdDSA/Ed25519 needs `com.google.crypto.tink/tink`.
 - ES256K (secp256k1) needs BouncyCastle (`org.bouncycastle/bcprov-jdk18on`).

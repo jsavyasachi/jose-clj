@@ -18,9 +18,11 @@ returns the raw Base64 values, while `jwk/x509-certificates` returns parsed
 `X509Certificate` objects.
 
 For JCA interoperability, `jwk/to-java-keys` converts one JWK or a collection
-of JWK inputs to a vector of Java keys. `jwk/to-java-private-key` explicitly
-selects the private key from a private JWK. Inputs follow `jwk/parse`: maps,
-JSON strings, and Nimbus JWK values are accepted.
+of JWK inputs to a vector of Java keys. The library works on JDK 11 and newer,
+but converting OKP JWKs to Java security keys requires JDK 15 or newer because
+Ed25519 and X25519 were added to the JDK in JDK 15. `jwk/to-java-private-key`
+explicitly selects the private key from a private JWK. Inputs follow
+`jwk/parse`: maps, JSON strings, and Nimbus JWK values are accepted.
 
 To load every key entry in a key store, use `jwk/keystore->jwks` with either a
 map of alias to password or a password lookup function:

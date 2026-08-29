@@ -237,8 +237,8 @@
 
 (defn- signer
   [^JWK key opts]
-  (let [options (jws-options opts)]
-  (let [key-type (.getKeyType key)]
+  (let [options (jws-options opts)
+        key-type (.getKeyType key)]
     (cond
       (= KeyType/RSA key-type) (RSASSASigner. ^RSAKey (.toRSAKey key) options)
       (= KeyType/EC key-type) (let [ec-key (.toECKey key)]
@@ -253,7 +253,7 @@
                                                    "Missing optional Tink dependency"
                                                    e
                                                    {:dep "com.google.crypto.tink/tink"}))))
-      :else (invalid-option! :alg)))))
+      :else (invalid-option! :alg))))
 
 (defn- deferred-signing-result
   [^JWSObject jws ^ActionRequiredForJWSCompletionException error]

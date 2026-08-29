@@ -3,7 +3,7 @@
             [jose.jwk :as jwk]
             [jose.jwks :as jwks])
   (:import (com.nimbusds.jose Algorithm EncryptionMethod JOSEException JOSEObject JOSEObjectType
-                               JWSAlgorithm JWSAlgorithm$Family JWSHeader JWEAlgorithm JWEHeader
+                               JWSAlgorithm JWSAlgorithm$Family JWEAlgorithm JWEHeader
                                JWSObject JWEObject Payload)
            (com.nimbusds.jose.jwk ECKey JWK JWKSet JWKSelector OctetKeyPair OctetSequenceKey RSAKey)
            (com.nimbusds.jose.jwk.source ImmutableJWKSet JWKSource)

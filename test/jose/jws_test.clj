@@ -5,12 +5,12 @@
             [jose.jws :as jws])
   (:import (clojure.lang ExceptionInfo)
            (com.nimbusds.jose.crypto MACSigner MACVerifier)
-           (com.nimbusds.jose ActionRequiredForJWSCompletionException JWSHeader)
-           (com.nimbusds.jose.jwk Curve JWK RSAKey RSAKey$Builder OctetSequenceKey OctetSequenceKey$Builder)
+           (com.nimbusds.jose JWSHeader)
+           (com.nimbusds.jose.jwk Curve JWK RSAKey$Builder OctetSequenceKey OctetSequenceKey$Builder)
            (com.nimbusds.jose.jwk.gen ECKeyGenerator)
            (com.nimbusds.jose.util Base64URL JSONObjectUtils)
            (java.nio.charset StandardCharsets)
-           (java.security KeyPairGenerator Provider SecureRandom)
+           (java.security KeyPairGenerator Provider)
            (org.bouncycastle.jce.provider BouncyCastleProvider)))
 
 (def rfc-jws-payload
