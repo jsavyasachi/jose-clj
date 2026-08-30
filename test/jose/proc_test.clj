@@ -12,10 +12,12 @@
            (com.nimbusds.jose.jwk Curve JWKSet)
            (com.nimbusds.jose.jwk.gen OctetKeyPairGenerator)
            (com.nimbusds.jose.jwk.source ImmutableJWKSet)
-           (com.nimbusds.jose.proc JWEDecrypterFactory JWSVerificationKeySelector
-                                   JWSVerifierFactory SimpleSecurityContext)
+           (com.nimbusds.jose.proc JWEDecrypterFactory JWEDecryptionKeySelector
+                                   JWEKeySelector JWSVerificationKeySelector
+                                   JWSVerifierFactory SecurityContext SimpleSecurityContext)
            (com.nimbusds.jose JWEDecrypter JWSVerifier JWEHeader)
-           (com.nimbusds.jose.jca JCAContext)))
+           (com.nimbusds.jose.jca JCAContext)
+           (java.util List)))
 
 (defn thrown-data [f]
   (try
@@ -139,7 +141,7 @@
     (is (= :header-mismatch
            (:jose/error (thrown-data #(proc/process processor typed)))))))
 
-(deftest algorithm-family-selector-derives-allowed-algorithms
+(deftest jws-key-selector-never-widens-configured-algorithms
   (let [key (jwk/generate :rsa {:size 2048 :kid "rsa"})
         source (jwks/local-source [(jwk/public-jwk key)])
         selector (proc/jws-key-selector :rsa source)
@@ -147,8 +149,46 @@
                                           :jwe-algs #{:dir}
                                           :jwe-encs #{:a256gcm}
                                           :jws-key-selector selector})
-        compact (jws/sign key "family payload" {:alg :rs512})]
-    (is (= "family payload" (:payload (proc/process processor compact))))))
+        rs512 (jws/sign key "family payload" {:alg :rs512})
+        rs256 (jws/sign key "family payload" {:alg :rs256})]
+    (testing "an algorithm the family allows but the policy does not is rejected"
+      (is (= :algorithm-not-allowed
+             (:jose/error (thrown-data #(proc/process processor rs512))))))
+    (testing "an algorithm in both the family and the policy still verifies"
+      (is (= "family payload" (:payload (proc/process processor rs256)))))))
+
+(deftest algorithm-family-selector-derives-allowed-algorithms
+  (testing "without an explicit :jws-algs the family still supplies the allow-list"
+    (let [key (jwk/generate :rsa {:size 2048 :kid "rsa"})
+          source (jwks/local-source [(jwk/public-jwk key)])
+          selector (proc/jws-key-selector :rsa source)
+          processor (proc/processor source {:jws-key-selector selector})
+          rs512 (jws/sign key "family payload" {:alg :rs512})
+          hs256 (jws/sign (jwk/generate :oct {:size 256 :kid "oct"}) "family payload")]
+      (is (nil? (:jws-algs processor)))
+      (is (= "family payload" (:payload (proc/process processor rs512))))
+      (testing "an algorithm outside the family is still refused a key"
+        (is (= :key-not-found (:jose/error (thrown-data #(proc/process processor hs256)))))))))
+
+(deftest jwe-key-selector-never-widens-configured-algorithms
+  (let [key (jwk/generate :oct {:size 256 :kid "enc"})
+        source (jwks/local-source [key])
+        ;; A deliberately permissive selector: it hands back a key for any
+        ;; algorithm and encryption method the header asks for.
+        selector (reify JWEKeySelector
+                   (^List selectJWEKeys [_ ^JWEHeader header ^SecurityContext context]
+                     (.selectJWEKeys (JWEDecryptionKeySelector. (.getAlgorithm header)
+                                                                (.getEncryptionMethod header)
+                                                                (:jwk-source source))
+                                     header context)))
+        processor (proc/processor source {:jwe-algs #{:dir}
+                                          :jwe-encs #{:a256gcm}
+                                          :jwe-key-selector selector})
+        allowed (jwe/encrypt key "enc payload" {:alg :dir :enc :a256gcm})
+        disallowed (jwe/encrypt key "enc payload" {:alg :dir :enc :a128cbc-hs256})]
+    (is (= "enc payload" (:payload (proc/process processor allowed))))
+    (is (= :algorithm-not-allowed
+           (:jose/error (thrown-data #(proc/process processor disallowed)))))))
 
 (deftest single-key-selector-round-trips-and-context-keys-work
   (let [key (jwk/generate :oct {:size 256})

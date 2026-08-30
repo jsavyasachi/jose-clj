@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- **Breaking:** `jose.proc/processor` no longer lets a supplied `:jws-key-selector` disable a configured `:jws-algs` allow-list. Previously, passing a key selector silently widened the policy: a processor built with `:jws-algs #{:rs256}` and an `:rsa` family selector accepted `RS512`. A selector may now only narrow the accepted algorithms, and the effective allow-list is the intersection of the configuration and the selector. Processors configured without `:jws-algs` still derive their algorithms from the selector alone.
+
+### Changed
+
+- **Breaking:** Removed the internal `jws-policy?` field from the `jose.proc/Processor` record. It existed only to suppress the allow-list check described above.
+
 ## [0.7.1] - 2026-08-28
 
 ### Fixed

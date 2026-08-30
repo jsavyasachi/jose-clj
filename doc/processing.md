@@ -33,6 +33,12 @@ URL with `jws-key-selector-from-jwk-set-url`. For one key, use
 `single-key-selector`. A `security-context` can supply JWKs per call:
 `(proc/process processor compact (proc/security-context [key]))`.
 
+A key selector can only narrow the algorithms a processor accepts. When
+`:jws-algs`, `:jwe-algs`, or `:jwe-encs` is also configured, the effective
+allow-list is the intersection of the configuration and the selector, so an
+`:rsa` family selector next to `:jws-algs #{:rs256}` still rejects `RS512`.
+Omit the allow-list to let the selector alone decide.
+
 To customize Nimbus's verification or decryption implementation, pass a
 `JWSVerifierFactory` as `:jws-verifier-factory` or a `JWEDecrypterFactory` as
 `:jwe-decrypter-factory`. Both default to Nimbus's

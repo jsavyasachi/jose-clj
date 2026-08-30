@@ -26,7 +26,7 @@
 (set! *warn-on-reflection* true)
 
 (defrecord Processor [^ConfigurableJOSEProcessor processor jws-algs jwe-algs encs typ
-                      jws-configured? jwe-configured? jws-policy?
+                      jws-configured? jwe-configured?
                       ^JWSVerifierFactory jws-verifier-factory
                       ^JWEDecrypterFactory jwe-decrypter-factory])
 
@@ -201,7 +201,13 @@
           (ArrayList.))))))
 
 (defn processor
-  "Builds a configurable generic JOSE processor for signed or encrypted JOSE."
+  "Builds a configurable generic JOSE processor for signed or encrypted JOSE.
+
+  A supplied :jws-key-selector or :jwe-key-selector may only narrow the
+  algorithms a processor accepts. When an explicit :jws-algs, :jwe-algs, or
+  :jwe-encs allow-list is also configured, the effective allow-list is the
+  intersection of the two: the selector never widens the configuration. With
+  no explicit allow-list the selector alone decides."
   ^Processor [source-value opts]
   (validate-options! opts)
   (let [jws-configured? (or (contains? opts :jws-alg) (contains? opts :jws-algs)
@@ -259,7 +265,6 @@
         (.setJWETypeVerifier processor verifier)))
     (->Processor processor jws-algs jwe-algs encs (:typ opts)
                  jws-configured? jwe-configured?
-                 (and jws-configured? (not (:jws-key-selector opts)))
                  jws-verifier-factory jwe-decrypter-factory)))
 
 (defn jws-verifier-factory
@@ -291,7 +296,9 @@
       (do
         (when-not (:jws-configured? handle)
           (throw (jose-ex :key-not-found "No JWS key selector is configured" nil {})))
-        (when (and (:jws-policy? handle) (:jws-algs handle)
+        ;; A supplied key selector may narrow the effective algorithms but must
+        ;; never widen a configured :jws-algs allow-list.
+        (when (and (:jws-algs handle)
                    (not (contains? (:jws-algs handle) (.getAlgorithm header))))
           (throw (jose-ex :algorithm-not-allowed "JWS algorithm is not allowed" nil
                           {:alg (.getAlgorithm header)}))))
