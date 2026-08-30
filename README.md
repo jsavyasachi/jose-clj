@@ -55,13 +55,13 @@ the key directly or provide a custom key selector.
 deps.edn:
 
 ```clojure
-net.clojars.savya/jose-clj {:mvn/version "0.7.1"}
+net.clojars.savya/jose-clj {:mvn/version "0.8.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/jose-clj "0.7.1"]
+[net.clojars.savya/jose-clj "0.8.0"]
 ```
 
 Tracks `com.nimbusds/nimbus-jose-jwt` 10.9.1. jose-clj is a thin wrapper, so you
