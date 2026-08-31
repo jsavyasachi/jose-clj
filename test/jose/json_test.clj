@@ -42,6 +42,14 @@
            (:jose/error (thrown-data #(jws/verify-json key json "tampered"
                                                         {:algs #{:hs256} :crit #{"b64"}})))))))
 
+(deftest verification-accepts-approved-deferred-critical-header-json
+  (let [key (jwk/generate :oct {:size 256})
+        json (jws/sign-json key "hello"
+                            {:alg :hs256
+                             :protected-headers {:crit ["exp"] :exp true}})]
+    (is (= "hello"
+           (:payload (jws/verify-json key json {:alg :hs256 :crit #{"exp"}}))))))
+
 (deftest malformed-json-fails-with-typed-parse-error
   (is (= :parse-failure
          (:jose/error (thrown-data #(jws/verify-json (jwk/generate :oct {:size 256})

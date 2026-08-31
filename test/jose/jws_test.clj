@@ -323,6 +323,14 @@
            (:jose/error (thrown-data #(jws/verify key attached {:algs #{:hs256}
                                                                  :crit #{}})))))))
 
+(deftest verification-accepts-approved-deferred-critical-header
+  (let [key (jwk/generate :oct {:size 256})
+        compact (jws/sign key "hello" {:alg :hs256
+                                        :crit #{"exp"}
+                                        :headers {:exp true}})]
+    (is (= "hello"
+           (:payload (jws/verify key compact {:alg :hs256 :crit #{"exp"}}))))))
+
 (deftest verify-with-jwks-selects-key
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
         key-b (jwk/generate :rsa {:kid "b" :use :sig :alg :rs256})

@@ -288,19 +288,24 @@
   ^JWK [^JWK key]
   (or (jwk/public-jwk key) key))
 
+(defn- critical-params
+  ^java.util.Set [opts]
+  (set (map #(if (keyword? %) (name %) (str %)) (:crit opts))))
+
 (defn- verifier
-  [^JWK key]
+  [^JWK key opts]
   (let [key (public-key key)
+        critical (critical-params opts)
         key-type (.getKeyType key)]
     (cond
-      (= KeyType/RSA key-type) (RSASSAVerifier. ^RSAKey (.toRSAKey key))
+      (= KeyType/RSA key-type) (RSASSAVerifier. (.toRSAPublicKey ^RSAKey (.toRSAKey key)) critical)
       (= KeyType/EC key-type) (let [ec-key (.toECKey key)]
                                 (with-optional-ec-provider
-                                  (ECDSAVerifier. ^ECKey ec-key)
+                                  (ECDSAVerifier. (.toECPublicKey ^ECKey ec-key) critical)
                                   ec-key))
-      (= KeyType/OCT key-type) (MACVerifier. ^OctetSequenceKey (.toOctetSequenceKey key))
+      (= KeyType/OCT key-type) (MACVerifier. ^OctetSequenceKey (.toOctetSequenceKey key) critical)
       (= KeyType/OKP key-type) (try
-                                 (Ed25519Verifier. ^OctetKeyPair (.toOctetKeyPair key))
+                                 (Ed25519Verifier. ^OctetKeyPair (.toOctetKeyPair key) critical)
                                  (catch NoClassDefFoundError e
                                    (throw (jose-ex :missing-optional-dep
                                                    "Missing optional Tink dependency"
@@ -428,7 +433,7 @@
        (validate-verification-policy! (.getHeader jws) opts)
        (when-not (.verify jws (if (instance? JWSVerifier key)
                                key
-                               (configure-context! (verifier (jwk/parse key)) opts)))
+                               (configure-context! (verifier (jwk/parse key) opts) opts)))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -451,7 +456,7 @@
        (validate-verification-policy! (.getHeader jws) opts)
        (when-not (.verify jws (if (instance? JWSVerifier key)
                                key
-                               (configure-context! (verifier (jwk/parse key)) opts)))
+                               (configure-context! (verifier (jwk/parse key) opts) opts)))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -626,7 +631,7 @@
           signature (Base64URL. ^String (get signature-map "signature"))]
       (when-not (some (fn [key]
                         (try
-                          (let [^JWSVerifier verifier (verifier key)]
+                          (let [^JWSVerifier verifier (verifier key opts)]
                             (.verify verifier protected ^bytes signing-input signature))
                           (catch JOSEException _ false)
                           (catch RuntimeException _ false)))
