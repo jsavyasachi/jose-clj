@@ -18,6 +18,30 @@ jobs:
           version: '2026.08.04'
       - run: clj-kondo --lint src test --fail-level warning
 
+  smoke:
+    name: base-classpath load
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: DeLaGuardo/setup-clojure@13.6.1
+        with:
+          cli: latest
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ hashFiles('deps.edn') }}
+          restore-keys: m2-
+      # Every public namespace must load with only the base dependencies.
+      # BouncyCastle is documented as optional; the :test alias supplies it and
+      # would mask a compile-time reference to it.
+      - run: clojure -M:smoke
+
   test:
     runs-on: ubuntu-latest
     strategy:
