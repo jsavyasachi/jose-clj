@@ -22,15 +22,23 @@
     (is true (str "Loaded " namespace))))
 
 (deftest missing-provider-is-a-typed-error
-  (let [key (jwk/generate :oct {:size 256})
-        compact (jws/sign key "hello")
-        error (try
-                (jws/verify key compact {:alg :hs256 :provider :bouncy-castle})
-                nil
-                (catch ExceptionInfo e
-                  (ex-data e)))]
-    (is (= :missing-optional-dep (:jose/error error)))
-    (is (= "org.bouncycastle/bcprov-jdk18on" (:dep error)))))
+  (if (not (try
+             (Class/forName "org.bouncycastle.jce.provider.BouncyCastleProvider"
+                           true
+                           (clojure.lang.RT/baseLoader))
+             true
+             (catch ClassNotFoundException _
+               false)))
+    (let [key (jwk/generate :oct {:size 256})
+          compact (jws/sign key "hello")
+          error (try
+                  (jws/verify key compact {:alg :hs256 :provider :bouncy-castle})
+                  nil
+                  (catch ExceptionInfo e
+                    (ex-data e)))]
+      (is (= :missing-optional-dep (:jose/error error)))
+      (is (= "org.bouncycastle/bcprov-jdk18on" (:dep error))))
+    (is true "BouncyCastle is available; absence behavior is covered by :smoke")))
 
 (defn -main
   [& _]
