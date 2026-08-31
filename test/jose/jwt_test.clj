@@ -175,6 +175,22 @@
                                                                       {:kid nil})
                                                             {:algs #{:rs256}})))))))
 
+(deftest jwt-verify-with-jwks-requires-signature-key-metadata
+  (let [encryption-key (jwk/generate :rsa {:kid "enc" :use :enc :alg :rs256})
+        operation-key (jwk/generate :rsa {:kid "op" :key-ops [:encrypt] :alg :rs256})]
+    (testing "encryption-only use is not selected"
+      (is (= :key-not-found
+             (:jose/error (thrown-data #(jwt/verify-with-jwks
+                                         (jwks/local-source [(jwk/public-jwk encryption-key)])
+                                         (jwt/sign encryption-key {:sub "hello"} {:alg :rs256})
+                                         {:alg :rs256})))))
+    (testing "encryption-only key operations are not selected"
+      (is (= :key-not-found
+             (:jose/error (thrown-data #(jwt/verify-with-jwks
+                                         (jwks/local-source [(jwk/public-jwk operation-key)])
+                                         (jwt/sign operation-key {:sub "hello"} {:alg :rs256})
+                                         {:alg :rs256})))))))))
+
 (deftest invalid-signatures-and-input
   (let [key (jwk/generate :oct {:size 256})
         other (jwk/generate :oct {:size 256})

@@ -893,8 +893,9 @@
         header (.getHeader jwt)
         kid (.getKeyID header)
         alg (.getAlgorithm header)
-        keys (jwks/get-keys source (cond-> {:alg alg}
-                                     kid (assoc :kid kid)))]
+        keys (filter jwks/signature-key?
+                     (jwks/get-keys source (cond-> {:alg alg}
+                                             kid (assoc :kid kid))))]
     (cond
       (empty? keys) (throw (jose-ex :key-not-found "No matching JWK found" nil {}))
       (and (nil? kid) (< 1 (count keys))) (throw (jose-ex :ambiguous-key "Multiple matching JWKs found" nil {}))

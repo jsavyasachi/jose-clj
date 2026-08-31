@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+### Security
+
+- **Breaking:** JWS and JWT verification through JWKS sources now rejects keys marked for encryption or without the `verify` key operation. Keys with absent usage metadata remain accepted.
+
 ## [0.8.0] - 2026-08-30
 
 ### Security

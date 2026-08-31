@@ -341,6 +341,29 @@
                                                             (jws/sign key-a "hello" {:kid nil})
                                                             {:algs #{:rs256}})))))))
 
+(deftest verify-with-jwks-requires-signature-key-metadata
+  (let [encryption-key (jwk/generate :rsa {:kid "enc" :use :enc :alg :rs256})
+        operation-key (jwk/generate :rsa {:kid "op" :key-ops [:encrypt] :alg :rs256})
+        metadata-free-key (jwk/generate :rsa {:kid "free" :alg :rs256})]
+    (testing "encryption-only use is not selected"
+      (is (= :key-not-found
+             (:jose/error (thrown-data #(jws/verify-with-jwks
+                                         (jwks/local-source [(jwk/public-jwk encryption-key)])
+                                         (jws/sign encryption-key "hello" {:alg :rs256})
+                                         {:alg :rs256})))))
+    (testing "encryption-only key operations are not selected"
+      (is (= :key-not-found
+             (:jose/error (thrown-data #(jws/verify-with-jwks
+                                         (jwks/local-source [(jwk/public-jwk operation-key)])
+                                         (jws/sign operation-key "hello" {:alg :rs256})
+                                         {:alg :rs256})))))
+    (testing "metadata-free keys remain valid"
+      (is (= "hello"
+             (:payload (jws/verify-with-jwks
+                         (jwks/local-source [(jwk/public-jwk metadata-free-key)])
+                         (jws/sign metadata-free-key "hello" {:alg :rs256})
+                         {:alg :rs256})))))))))
+
 (deftest alg-confusion-attack-is-rejected
   ;; A JWKS serves only an RSA public key with no "alg" param. Many endpoints
   ;; do this. An attacker forges an HS256 token with the RSA public key material

@@ -336,3 +336,11 @@
   "Returns the first key with kid, or nil."
   ^JWK [source-value kid]
   (first (get-keys source-value {:kid kid})))
+
+(defn signature-key?
+  "Returns true when a JWK is unrestricted or explicitly usable for verification."
+  [key]
+  (let [use (jwk/key-use key)
+        operations (jwk/key-operations key)]
+    (and (or (nil? use) (= :sig use))
+         (or (nil? operations) (contains? operations :verify)))))
