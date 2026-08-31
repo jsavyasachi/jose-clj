@@ -8,6 +8,10 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 - **Breaking:** JWS and JWT verification through JWKS sources now rejects keys marked for encryption or without the `verify` key operation. Keys with absent usage metadata remain accepted.
 
+### Fixed
+
+- Optional BouncyCastle provider classes are now loaded reflectively, allowing all public namespaces to load on the base dependency graph.
+
 ## [0.8.0] - 2026-08-30
 
 ### Security

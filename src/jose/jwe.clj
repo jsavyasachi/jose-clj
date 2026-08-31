@@ -101,14 +101,32 @@
     (when-not (contains? decrypt-options option)
       (invalid-option! option))))
 
+(defn- optional-provider
+  ^Provider [class-name dep]
+  (try
+    (clojure.lang.Reflector/invokeStaticMethod
+     (Class/forName class-name)
+     "getInstance"
+     (object-array 0))
+    (catch ClassNotFoundException e
+      (throw (jose-ex :missing-optional-dep
+                      "Missing optional cryptographic provider dependency"
+                      e
+                      {:dep dep})))
+    (catch LinkageError e
+      (throw (jose-ex :missing-optional-dep
+                      "Missing optional cryptographic provider dependency"
+                      e
+                      {:dep dep})))))
+
 (defn- provider
   ^Provider [value]
   (cond
     (instance? Provider value) value
-    (= :bouncy-castle value) (try (com.nimbusds.jose.crypto.bc.BouncyCastleProviderSingleton/getInstance)
-                                  (catch LinkageError e (throw (jose-ex :missing-optional-dep "Missing optional Bouncy Castle dependency" e {:dep "org.bouncycastle/bcprov-jdk18on"}))))
-    (= :bouncy-castle-fips value) (try (com.nimbusds.jose.crypto.bc.BouncyCastleFIPSProviderSingleton/getInstance)
-                                      (catch LinkageError e (throw (jose-ex :missing-optional-dep "Missing optional Bouncy Castle FIPS dependency" e {:dep "org.bouncycastle/bc-fips"}))))
+    (= :bouncy-castle value) (optional-provider "com.nimbusds.jose.crypto.bc.BouncyCastleProviderSingleton"
+                                               "org.bouncycastle/bcprov-jdk18on")
+    (= :bouncy-castle-fips value) (optional-provider "com.nimbusds.jose.crypto.bc.BouncyCastleFIPSProviderSingleton"
+                                                    "org.bouncycastle/bc-fips")
     :else (invalid-option! :provider)))
 
 (defn- configure-context!
