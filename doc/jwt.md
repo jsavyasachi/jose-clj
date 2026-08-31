@@ -41,7 +41,8 @@ epoch seconds.
 
 ```clojure
 (jwt/verify signing-key token
-            {:iss "https://issuer.example"
+            {:alg :rs256
+             :iss "https://issuer.example"
              :aud "api"
              :clock-skew 60
              :required [:sub]})
@@ -121,7 +122,8 @@ jose-clj signs a nested JWT first, then encrypts it. The encrypted JWE carries
 (jwt/decrypt-then-verify encryption-key
                          signing-key
                          nested-token
-                         {:iss "https://issuer.example"
+                         {:alg :rs256
+                          :iss "https://issuer.example"
                           :required [:sub]})
 ;; => verified claims map
 ```

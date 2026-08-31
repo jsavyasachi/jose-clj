@@ -82,7 +82,7 @@ for a key ID, or `nil`.
 (def compact-jws
   (jws/sign rsa-key "payload" {:alg :rs256 :kid "rsa-1"}))
 
-(jws/verify-with-jwks local compact-jws)
+(jws/verify-with-jwks local compact-jws {:alg :rs256})
 ;; => {:payload "payload", :payload-bytes ..., :header ...}
 
 (def compact-jwt
@@ -90,7 +90,7 @@ for a key ID, or `nil`.
             {:sub "alice" :iss "https://issuer.example"}
             {:alg :rs256 :kid "rsa-1" :expires-in 3600}))
 
-(jwt/verify-with-jwks local compact-jwt {:iss "https://issuer.example"})
+(jwt/verify-with-jwks local compact-jwt {:alg :rs256 :iss "https://issuer.example"})
 ;; => verified claims map
 ```
 

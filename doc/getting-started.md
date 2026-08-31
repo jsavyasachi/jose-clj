@@ -57,7 +57,7 @@ If you use an EdDSA or ES256K path without its optional engine, jose-clj throws
             {:sub "alice" :iss "me"}
             {:expires-in 3600 :now-iat? true}))
 
-(jwt/verify signing-key token {:iss "me" :required [:sub]})
+(jwt/verify signing-key token {:alg :rs256 :iss "me" :required [:sub]})
 ;; => {:sub "alice"
 ;;     :iss "me"
 ;;     :iat #object[java.time.Instant ...]

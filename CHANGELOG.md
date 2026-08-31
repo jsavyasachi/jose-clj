@@ -12,6 +12,7 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 - Optional BouncyCastle provider classes are now loaded reflectively, allowing all public namespaces to load on the base dependency graph.
 - Verification now passes caller-approved critical JWS header parameters to Nimbus, so deferred critical headers work for compact and JSON JWS.
+- Verification examples now include the required algorithm allow-list options.
 
 ## [0.8.0] - 2026-08-30
 
