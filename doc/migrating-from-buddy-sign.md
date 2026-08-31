@@ -37,7 +37,7 @@ helpers for key loading. jose-clj APIs take JWK input:
 (def token
   (jwt/sign key {:sub "alice"} {:expires-in 3600}))
 
-(jwt/verify key token {:required [:sub]})
+(jwt/verify key token {:alg :rs256 :required [:sub]})
 ```
 
 `jwk/parse` accepts JWK JSON strings, Clojure maps, or Nimbus JWK values.
@@ -91,7 +91,7 @@ For non-JWT JWS payloads:
 (def compact
   (jws/sign key "payload" {:alg :rs256 :kid "sig-1"}))
 
-(jws/verify key compact)
+(jws/verify key compact {:alg :rs256})
 ;; => {:payload "payload", :payload-bytes ..., :header ...}
 ```
 

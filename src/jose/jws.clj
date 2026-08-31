@@ -196,22 +196,32 @@
         (catch ClassNotFoundException _
           nil))))
 
+(defn- optional-provider
+  ^Provider [class-name dep]
+  (try
+    (clojure.lang.Reflector/invokeStaticMethod
+     (Class/forName class-name)
+     "getInstance"
+     (object-array 0))
+    (catch ClassNotFoundException e
+      (throw (jose-ex :missing-optional-dep
+                      "Missing optional cryptographic provider dependency"
+                      e
+                      {:dep dep})))
+    (catch LinkageError e
+      (throw (jose-ex :missing-optional-dep
+                      "Missing optional cryptographic provider dependency"
+                      e
+                      {:dep dep})))))
+
 (defn- provider
   ^Provider [value]
   (cond
     (instance? Provider value) value
-    (= :bouncy-castle value) (try
-                               (com.nimbusds.jose.crypto.bc.BouncyCastleProviderSingleton/getInstance)
-                               (catch LinkageError e
-                                 (throw (jose-ex :missing-optional-dep
-                                                 "Missing optional Bouncy Castle dependency" e
-                                                 {:dep "org.bouncycastle/bcprov-jdk18on"}))))
-    (= :bouncy-castle-fips value) (try
-                                   (com.nimbusds.jose.crypto.bc.BouncyCastleFIPSProviderSingleton/getInstance)
-                                   (catch LinkageError e
-                                     (throw (jose-ex :missing-optional-dep
-                                                     "Missing optional Bouncy Castle FIPS dependency" e
-                                                     {:dep "org.bouncycastle/bc-fips"}))))
+    (= :bouncy-castle value) (optional-provider "com.nimbusds.jose.crypto.bc.BouncyCastleProviderSingleton"
+                                               "org.bouncycastle/bcprov-jdk18on")
+    (= :bouncy-castle-fips value) (optional-provider "com.nimbusds.jose.crypto.bc.BouncyCastleFIPSProviderSingleton"
+                                                    "org.bouncycastle/bc-fips")
     :else (invalid-option! :provider)))
 
 (defn- jws-options
@@ -278,19 +288,24 @@
   ^JWK [^JWK key]
   (or (jwk/public-jwk key) key))
 
+(defn- critical-params
+  ^java.util.Set [opts]
+  (set (map #(if (keyword? %) (name %) (str %)) (:crit opts))))
+
 (defn- verifier
-  [^JWK key]
+  [^JWK key opts]
   (let [key (public-key key)
+        critical (critical-params opts)
         key-type (.getKeyType key)]
     (cond
-      (= KeyType/RSA key-type) (RSASSAVerifier. ^RSAKey (.toRSAKey key))
+      (= KeyType/RSA key-type) (RSASSAVerifier. (.toRSAPublicKey ^RSAKey (.toRSAKey key)) critical)
       (= KeyType/EC key-type) (let [ec-key (.toECKey key)]
                                 (with-optional-ec-provider
-                                  (ECDSAVerifier. ^ECKey ec-key)
+                                  (ECDSAVerifier. (.toECPublicKey ^ECKey ec-key) critical)
                                   ec-key))
-      (= KeyType/OCT key-type) (MACVerifier. ^OctetSequenceKey (.toOctetSequenceKey key))
+      (= KeyType/OCT key-type) (MACVerifier. ^OctetSequenceKey (.toOctetSequenceKey key) critical)
       (= KeyType/OKP key-type) (try
-                                 (Ed25519Verifier. ^OctetKeyPair (.toOctetKeyPair key))
+                                 (Ed25519Verifier. ^OctetKeyPair (.toOctetKeyPair key) critical)
                                  (catch NoClassDefFoundError e
                                    (throw (jose-ex :missing-optional-dep
                                                    "Missing optional Tink dependency"
@@ -418,7 +433,7 @@
        (validate-verification-policy! (.getHeader jws) opts)
        (when-not (.verify jws (if (instance? JWSVerifier key)
                                key
-                               (configure-context! (verifier (jwk/parse key)) opts)))
+                               (configure-context! (verifier (jwk/parse key) opts) opts)))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -441,7 +456,7 @@
        (validate-verification-policy! (.getHeader jws) opts)
        (when-not (.verify jws (if (instance? JWSVerifier key)
                                key
-                               (configure-context! (verifier (jwk/parse key)) opts)))
+                               (configure-context! (verifier (jwk/parse key) opts) opts)))
          (throw (jose-ex :invalid-signature "Invalid JWS signature" nil {})))
        (let [^Payload payload (.getPayload jws)
              bytes (.toBytes payload)]
@@ -459,8 +474,9 @@
 (defn- select-jwks-key
   [source compact]
   (let [{:keys [kid alg]} (header compact)
-        keys (jwks/get-keys source (cond-> {:alg alg}
-                                     kid (assoc :kid kid)))]
+        keys (filter jwks/signature-key?
+                     (jwks/get-keys source (cond-> {:alg alg}
+                                             kid (assoc :kid kid))))]
     (cond
       (empty? keys) (throw (jose-ex :key-not-found "No matching JWK found" nil {}))
       (and (nil? kid) (< 1 (count keys))) (throw (jose-ex :ambiguous-key "Multiple matching JWKs found" nil {}))
@@ -615,7 +631,7 @@
           signature (Base64URL. ^String (get signature-map "signature"))]
       (when-not (some (fn [key]
                         (try
-                          (let [^JWSVerifier verifier (verifier key)]
+                          (let [^JWSVerifier verifier (verifier key opts)]
                             (.verify verifier protected ^bytes signing-input signature))
                           (catch JOSEException _ false)
                           (catch RuntimeException _ false)))

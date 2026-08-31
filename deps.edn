@@ -17,6 +17,10 @@
                 org.bouncycastle/bcpkix-jdk18on {:mvn/version "1.85"}}
    :main-opts ["-m" "kaocha.runner"]}
 
+  :smoke
+  {:extra-paths ["test"]
+   :main-opts ["-m" "jose.base-classpath-test"]}
+
   ;; Clojure version overrides for the CI matrix:
   ;;   clojure -M:1.11:test   /   clojure -M:1.12:test
   :1.11 {:override-deps {org.clojure/clojure {:mvn/version "1.11.4"}}}

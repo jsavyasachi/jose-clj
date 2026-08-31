@@ -331,19 +331,24 @@
   ^JWK [^JWK key]
   (or (jwk/public-jwk key) key))
 
+(defn- critical-params
+  ^java.util.Set [opts]
+  (set (map #(if (keyword? %) (name %) (str %)) (:crit opts))))
+
 (defn- verifier
-  [^JWK key]
+  [^JWK key opts]
   (let [key (public-key key)
+        critical (critical-params opts)
         key-type (.getKeyType key)]
     (cond
-      (= KeyType/RSA key-type) (RSASSAVerifier. ^RSAKey (.toRSAKey key))
+      (= KeyType/RSA key-type) (RSASSAVerifier. (.toRSAPublicKey ^RSAKey (.toRSAKey key)) critical)
       (= KeyType/EC key-type) (let [ec-key (.toECKey key)]
                                 (with-optional-ec-provider
-                                  (ECDSAVerifier. ^ECKey ec-key)
+                                  (ECDSAVerifier. (.toECPublicKey ^ECKey ec-key) critical)
                                   ec-key))
-      (= KeyType/OCT key-type) (MACVerifier. ^OctetSequenceKey (.toOctetSequenceKey key))
+      (= KeyType/OCT key-type) (MACVerifier. ^OctetSequenceKey (.toOctetSequenceKey key) critical)
       (= KeyType/OKP key-type) (try
-                                 (Ed25519Verifier. ^OctetKeyPair (.toOctetKeyPair key))
+                                 (Ed25519Verifier. ^OctetKeyPair (.toOctetKeyPair key) critical)
                                  (catch NoClassDefFoundError e
                                    (throw (jose-ex :missing-optional-dep
                                                    "Missing optional Tink dependency"
@@ -879,7 +884,7 @@
      (let [jwt (signed-jwt compact)
            header (.getHeader jwt)]
        (validate-verification-policy! header opts)
-       (when-not (.verify jwt (verifier (jwk/parse key)))
+       (when-not (.verify jwt (verifier (jwk/parse key) opts))
          (throw (jose-ex :invalid-signature "Invalid JWT signature" nil {})))
        (validated-claims (.getJWTClaimsSet jwt) opts))
      (catch JOSEException e
@@ -893,8 +898,9 @@
         header (.getHeader jwt)
         kid (.getKeyID header)
         alg (.getAlgorithm header)
-        keys (jwks/get-keys source (cond-> {:alg alg}
-                                     kid (assoc :kid kid)))]
+        keys (filter jwks/signature-key?
+                     (jwks/get-keys source (cond-> {:alg alg}
+                                             kid (assoc :kid kid))))]
     (cond
       (empty? keys) (throw (jose-ex :key-not-found "No matching JWK found" nil {}))
       (and (nil? kid) (< 1 (count keys))) (throw (jose-ex :ambiguous-key "Multiple matching JWKs found" nil {}))

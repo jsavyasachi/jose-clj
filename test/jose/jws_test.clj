@@ -323,6 +323,14 @@
            (:jose/error (thrown-data #(jws/verify key attached {:algs #{:hs256}
                                                                  :crit #{}})))))))
 
+(deftest verification-accepts-approved-deferred-critical-header
+  (let [key (jwk/generate :oct {:size 256})
+        compact (jws/sign key "hello" {:alg :hs256
+                                        :crit #{"exp"}
+                                        :headers {:exp true}})]
+    (is (= "hello"
+           (:payload (jws/verify key compact {:alg :hs256 :crit #{"exp"}}))))))
+
 (deftest verify-with-jwks-selects-key
   (let [key-a (jwk/generate :rsa {:kid "a" :use :sig :alg :rs256})
         key-b (jwk/generate :rsa {:kid "b" :use :sig :alg :rs256})
@@ -340,6 +348,29 @@
            (:jose/error (thrown-data #(jws/verify-with-jwks source
                                                             (jws/sign key-a "hello" {:kid nil})
                                                             {:algs #{:rs256}})))))))
+
+(deftest verify-with-jwks-requires-signature-key-metadata
+  (let [encryption-key (jwk/generate :rsa {:kid "enc" :use :enc :alg :rs256})
+        operation-key (jwk/generate :rsa {:kid "op" :key-ops [:encrypt] :alg :rs256})
+        metadata-free-key (jwk/generate :rsa {:kid "free" :alg :rs256})]
+    (testing "encryption-only use is not selected"
+      (is (= :key-not-found
+             (:jose/error (thrown-data #(jws/verify-with-jwks
+                                         (jwks/local-source [(jwk/public-jwk encryption-key)])
+                                         (jws/sign encryption-key "hello" {:alg :rs256})
+                                         {:alg :rs256})))))
+    (testing "encryption-only key operations are not selected"
+      (is (= :key-not-found
+             (:jose/error (thrown-data #(jws/verify-with-jwks
+                                         (jwks/local-source [(jwk/public-jwk operation-key)])
+                                         (jws/sign operation-key "hello" {:alg :rs256})
+                                         {:alg :rs256})))))
+    (testing "metadata-free keys remain valid"
+      (is (= "hello"
+             (:payload (jws/verify-with-jwks
+                         (jwks/local-source [(jwk/public-jwk metadata-free-key)])
+                         (jws/sign metadata-free-key "hello" {:alg :rs256})
+                         {:alg :rs256})))))))))
 
 (deftest alg-confusion-attack-is-rejected
   ;; A JWKS serves only an RSA public key with no "alg" param. Many endpoints

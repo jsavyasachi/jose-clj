@@ -92,7 +92,7 @@ the engine, the error is `{:jose/error :missing-optional-dep}` and not a
 
 ;; signed JWT with claims and an expiry
 (def token (jwt/sign k {:sub "alice" :iss "me"} {:expires-in 3600}))
-(jwt/verify k token {:iss "me"})
+(jwt/verify k token {:alg :rs256 :iss "me"})
 ;; => {:sub "alice" :iss "me" :exp 1751...}
 
 ;; JWE round trip (ECDH-ES key agreement + A256GCM)
@@ -200,7 +200,7 @@ or a collection of JWKs to Java keys.
 ```clojure
 (jws/sign k "payload")                 ; alg defaults per key type
 (jws/sign k "payload" {:alg :rs256 :kid "k1" :headers {:cty "example"}})
-(jws/verify k compact)                 ; => {:payload .. :payload-bytes .. :header ..}
+(jws/verify k compact {:alg :rs256})   ; => {:payload .. :payload-bytes .. :header ..}
 (jws/header compact)                   ; unverified header
 ```
 
@@ -208,14 +208,14 @@ or a collection of JWKs to Java keys.
 
 ```clojure
 (def detached (jws/sign k "payload" {:detached? true}))
-(jws/verify-detached k detached "payload")
+(jws/verify-detached k detached "payload" {:alg :rs256})
 
 (def unencoded (jws/sign k "payload" {:b64? false}))
-(jws/verify k unencoded)
+(jws/verify k unencoded {:alg :rs256})
 
 (def detached-unencoded
   (jws/sign k "$.02" {:detached? true :b64? false}))
-(jws/verify-detached k detached-unencoded "$.02")
+(jws/verify-detached k detached-unencoded "$.02" {:alg :rs256})
 ```
 
 `:detached? true` serializes compact JWS as `header..signature`.
@@ -266,7 +266,7 @@ places key-management data on each recipient.
 
 ```clojure
 (jwt/sign k {:sub "alice"} {:expires-in 3600 :now-iat? true})
-(jwt/verify k token {:iss "me" :aud "you" :clock-skew 60 :required [:sub]})
+(jwt/verify k token {:alg :rs256 :iss "me" :aud "you" :clock-skew 60 :required [:sub]})
 ;; validation failures throw ex-info: :expired :not-yet-valid
 ;; :claim-mismatch :missing-claim :invalid-signature
 
@@ -276,7 +276,7 @@ places key-management data on each recipient.
 
 ;; nested: sign then encrypt, decrypt then verify
 (jwt/sign-then-encrypt sign-key enc-key {:sub "alice"})
-(jwt/decrypt-then-verify enc-key sign-key token {:iss "me"})
+(jwt/decrypt-then-verify enc-key sign-key token {:alg :rs256 :iss "me"})
 ```
 
 ### Remote JWKS (`jose.jwks`)
@@ -297,8 +297,8 @@ places key-management data on each recipient.
 ;; verify a token against the source: the key is picked by the token's kid and
 ;; alg, and the verifier is chosen from the key type - so an HS256 forgery over
 ;; an RSA public key is rejected, not confused for a valid MAC
-(jws/verify-with-jwks src compact)
-(jwt/verify-with-jwks src token {:iss "https://accounts.google.com"})
+(jws/verify-with-jwks src compact {:alg :rs256})
+(jwt/verify-with-jwks src token {:alg :rs256 :iss "https://accounts.google.com"})
 ```
 
 ### Key rotation and public JWKS (`jose.keyring`)
