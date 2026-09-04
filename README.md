@@ -2,7 +2,7 @@
 
 [![Clojars Project](https://img.shields.io/clojars/v/net.clojars.savya/jose-clj.svg)](https://clojars.org/net.clojars.savya/jose-clj)
 [![cljdoc](https://cljdoc.org/badge/net.clojars.savya/jose-clj)](https://cljdoc.org/d/net.clojars.savya/jose-clj/CURRENT)
-[![test](https://github.com/jsavyasachi/jose-clj/actions/workflows/test.yml/badge.svg)](https://github.com/jsavyasachi/jose-clj/actions/workflows/test.yml)
+[![test](https://github.com/savyalabs/jose-clj/actions/workflows/test.yml/badge.svg)](https://github.com/savyalabs/jose-clj/actions/workflows/test.yml)
 
 Idiomatic Clojure JOSE - JWS, JWE, JWK/JWKS, and JWT (signed, encrypted, and
 nested) - over [Nimbus JOSE+JWT](https://connect2id.com/products/nimbus-jose-jwt),

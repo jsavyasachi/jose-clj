@@ -23,12 +23,12 @@
                 :version version
                 :basis @basis
                 :src-dirs ["src"]
-                :scm {:url "https://github.com/jsavyasachi/jose-clj"
-                      :connection "scm:git:https://github.com/jsavyasachi/jose-clj.git"
-                      :developerConnection "scm:git:ssh://git@github.com/jsavyasachi/jose-clj.git"
+                :scm {:url "https://github.com/savyalabs/jose-clj"
+                      :connection "scm:git:https://github.com/savyalabs/jose-clj.git"
+                      :developerConnection "scm:git:ssh://git@github.com/savyalabs/jose-clj.git"
                       :tag (str "v" version)}
                 :pom-data [[:description "Idiomatic Clojure JOSE: JWS, JWE, JWK/JWKS, and JWT (signed, encrypted, nested) over Nimbus JOSE+JWT."]
-                           [:url "https://github.com/jsavyasachi/jose-clj"]
+                           [:url "https://github.com/savyalabs/jose-clj"]
                            [:licenses
                             [:license
                              [:name "Eclipse Public License 2.0"]
